@@ -3,6 +3,7 @@
 import os
 import sys
 import asyncio
+import contextlib
 import signal
 import time
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 from backend.consensus.worker import ConsensusWorker
+from backend.consensus import worker_control
 from backend.protocol_rpc.message_handler.redis_worker_handler import (
     RedisWorkerMessageHandler,
 )
@@ -235,6 +237,10 @@ async def lifespan(app: FastAPI):
         hide_parameters=True,
     )
 
+    # Refuse DB writes of tasks claimed before a snapshot restore (stale
+    # in-memory state), see backend/consensus/worker_control.py
+    worker_control.install_write_fence(engine)
+
     # Create session factory
     SessionLocal = sessionmaker(
         autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
@@ -320,6 +326,19 @@ async def lifespan(app: FastAPI):
         poll_interval=poll_interval,
         transaction_timeout_minutes=transaction_timeout,
         should_shutdown=should_shutdown_callback,
+    )
+
+    # Subscribe to control events (pause + release in-flight work while the
+    # RPC restores a snapshot, then resume)
+    await msg_handler.subscribe_to_worker_control_events(worker.handle_control_event)
+
+    # Liveness lock: lets a snapshot restore confirm this worker is gone (Postgres
+    # drops the lock with our connection) instead of guessing from claim age.
+    # No claims until it is held.
+    liveness = worker_control.WorkerLiveness(engine, worker.worker_id)
+    worker.liveness_ok = False
+    liveness_task = asyncio.create_task(
+        worker_control.maintain_liveness(worker, liveness)
     )
 
     # Get restart configuration from environment
@@ -473,6 +492,12 @@ async def lifespan(app: FastAPI):
                 logger.info("Validators manager terminated successfully")
             except Exception as e:
                 logger.error(f"Error terminating validators manager: {e}")
+
+        # Drop the liveness lock last: in-flight work has been handled above
+        liveness_task.cancel()
+        with contextlib.suppress(BaseException):
+            await liveness_task
+        await asyncio.to_thread(liveness.close)
 
         # Clean up message handler
         if msg_handler:

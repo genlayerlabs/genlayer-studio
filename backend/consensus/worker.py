@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import contextvars
 import json
 import time
 import uuid
@@ -28,6 +29,7 @@ from backend.consensus.base import (
 from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.errors import FinalizationStateError
 from backend.protocol_rpc.fees import acceptance_dispatch_pending
+from backend.consensus import worker_control
 
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
@@ -213,6 +215,18 @@ class ConsensusWorker:
             {}
         )  # Track currently processing transactions by hash
         self._active_tasks: set[asyncio.Task] = set()  # Track active processing tasks
+        # > 0 while release_in_flight() is cancelling/cleaning up work. No new
+        # claims are made meanwhile — even if the restore gate has already
+        # been released (RPC timed out) — so the final sweep can only ever
+        # touch claims that existed before the release started.
+        self._releases_in_progress = 0
+        # False while this worker does not hold its liveness lock (see
+        # worker_control.WorkerLiveness): a restore would treat claims made
+        # then as abandoned, so none are made. The worker service starts it
+        # False and flips it once the lock is held.
+        self.liveness_ok = True
+        # Bound on waiting for cancelled tasks to finish their cleanup.
+        self.release_timeout_seconds = worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
@@ -830,6 +844,116 @@ class ConsensusWorker:
                 )
             raise
 
+    def release_all_claims(self, session: Session) -> int:
+        """Clear blocked_at/worker_id on every transaction claimed by this worker."""
+        result = session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET blocked_at = NULL,
+                    worker_id = NULL
+                WHERE worker_id = :worker_id
+                RETURNING hash
+            """
+            ),
+            {"worker_id": self.worker_id},
+        )
+        released = len(result.fetchall())
+        session.commit()
+        return released
+
+    async def release_in_flight(self):
+        """
+        Drop in-flight work and release its claims.
+
+        Called before the database is rewritten under the worker (snapshot
+        restore). In-flight processing tasks are cancelled so they don't
+        write stale results on top of the new state; their claims are
+        cleared so the RPC can see the worker has let go.
+
+        Claims by other workers are blocked by the restore gate (see
+        worker_control). This worker additionally stops claiming until its
+        own cleanup has finished: cleanup can outlast the RPC's timeout, and
+        claims made after the gate reopens must not be swept below.
+        """
+        # Set before the first await: no claim can slip in after this point.
+        self._releases_in_progress += 1
+        try:
+            await self._release_in_flight()
+        finally:
+            self._releases_in_progress -= 1
+
+    @property
+    def is_releasing(self) -> bool:
+        """True while in-flight work is being cancelled and released."""
+        return self._releases_in_progress > 0
+
+    async def _release_in_flight(self):
+        tasks = [t for t in self._active_tasks if not t.done()]
+        logger.info(
+            f"[Worker {self.worker_id}] Releasing in-flight work; "
+            f"cancelling {len(tasks)} task(s)"
+        )
+        for task in tasks:
+            task.cancel()
+        # Drop them from the active set right away so run() never sees them.
+        self._active_tasks.difference_update(tasks)
+        stuck: list[asyncio.Task] = []
+        if tasks:
+            # Shielded so a timeout doesn't cancel the tasks' cleanup again.
+            gathered = asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(gathered), self.release_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                stuck = [t for t in tasks if not t.done()]
+                logger.error(
+                    f"[Worker {self.worker_id}] {len(stuck)} cancelled task(s) did "
+                    f"not finish within {self.release_timeout_seconds}s; resuming, they "
+                    f"keep their claims and slots: "
+                    f"{[t.get_name() for t in stuck]}"
+                )
+                # Still running: keep counting them against capacity.
+                self._active_tasks.update(stuck)
+
+        # In-memory per-transaction state refers to the old database contents.
+        self.current_transactions.clear()
+        self._no_validators_retries.clear()
+        self._generic_error_retries.clear()
+        self._leader_crash_retries.clear()
+
+        # A stuck task still holds its claim and may still write: leave the
+        # claims in place so the restore refuses to run under it.
+        if stuck:
+            return
+
+        # Cancelled tasks release their own claim; sweep anything left over
+        # (e.g. a task cancelled before it started running).
+        try:
+            with self.get_session() as session:
+                released = self.release_all_claims(session)
+            if released:
+                logger.info(
+                    f"[Worker {self.worker_id}] Released {released} remaining claim(s)"
+                )
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to release claims: {e}",
+                exc_info=True,
+            )
+
+    async def handle_control_event(self, event_data: dict):
+        """Dispatch an event received on the worker control channel."""
+
+        event = event_data.get("event")
+        if event == worker_control.RELEASE_IN_FLIGHT_EVENT:
+            await self.release_in_flight()
+        else:
+            logger.warning(
+                f"[Worker {self.worker_id}] Unknown worker control event: {event}"
+            )
+
     @asynccontextmanager
     async def _transaction_context(
         self,
@@ -1179,6 +1303,10 @@ class ConsensusWorker:
             RETURNING hash, status;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         restored_appeals = session.execute(
             restore_appeals_query,
             {
@@ -1246,6 +1374,10 @@ class ConsensusWorker:
             RETURNING hash, recovery_count;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         escalated = session.execute(
             escalate_query,
             {
@@ -1281,6 +1413,10 @@ class ConsensusWorker:
             RETURNING hash, status;
             """
         ).bindparams(bindparam("finalization_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         released = session.execute(
             release_finalization_query,
             {
@@ -1343,6 +1479,10 @@ class ConsensusWorker:
             RETURNING hash, status, recovery_count;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
 
         result = session.execute(
             recovery_query,
@@ -2650,6 +2790,19 @@ class ConsensusWorker:
         with self.get_session() as session:
             await self.process_appeal(appeal_data, session)
 
+    def _spawn(self, coro, epoch: int) -> asyncio.Task:
+        """Start a processing task tagged with the restore epoch of its claim.
+
+        Every DB transaction the task (and anything it spawns or runs in a
+        thread) opens is fenced against that epoch: after a snapshot restore
+        it can no longer write (worker_control.install_write_fence).
+        """
+        context = contextvars.copy_context()
+        context.run(worker_control.TASK_RESTORE_EPOCH.set, epoch)
+        task = asyncio.create_task(coro, context=context)
+        self._active_tasks.add(task)
+        return task
+
     async def _try_claim_work(self, session: Session) -> bool:
         """
         Try to claim and spawn task for next work item.
@@ -2660,6 +2813,22 @@ class ConsensusWorker:
         Returns:
             True if work was claimed and task spawned, False otherwise
         """
+        # Our own release cleanup still running: claiming now would hand the
+        # sweep in release_in_flight() a claim that isn't stale.
+        if self.is_releasing or not self.liveness_ok:
+            return False
+
+        # Restore gate: while a snapshot restore holds it, no claims at all.
+        # The shared lock lives until this session's transaction ends, i.e.
+        # it covers the claim UPDATE that follows. It is re-checked before
+        # every claim because a backoff release below commits (ending the
+        # transaction and with it the lock). The restore epoch is read in the
+        # same transaction: it can't change while the gate is held shared, so
+        # it is the epoch the claim belongs to (see _spawn).
+        if not worker_control.claim_gate_open(session):
+            return False
+        epoch = worker_control.current_restore_epoch(session)
+
         # Priority: appeals > finalizations > transactions
 
         appeal_data = await self.claim_next_appeal(session)
@@ -2669,10 +2838,12 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed appeal for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(self._process_appeal_task(appeal_data))
-                self._active_tasks.add(task)
+                self._spawn(self._process_appeal_task(appeal_data), epoch)
                 return True
             self.release_transaction(session, tx_hash)
+            if not worker_control.claim_gate_open(session):
+                return False
+            epoch = worker_control.current_restore_epoch(session)
 
         finalization_data = await self.claim_next_finalization(
             session, exclude_hashes=self._backoff_hashes()
@@ -2684,12 +2855,12 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(
-                    self._process_finalization_task(finalization_data)
-                )
-                self._active_tasks.add(task)
+                self._spawn(self._process_finalization_task(finalization_data), epoch)
                 return True
             self.release_transaction(session, tx_hash)
+            if not worker_control.claim_gate_open(session):
+                return False
+            epoch = worker_control.current_restore_epoch(session)
 
         transaction_data = await self.claim_next_transaction(session)
         if transaction_data:
@@ -2697,10 +2868,7 @@ class ConsensusWorker:
             # Check backoff for no-validators retry
             if not self._is_in_backoff(transaction_data):
                 logger.debug(f"[Worker {self.worker_id}] Claimed transaction {tx_hash}")
-                task = asyncio.create_task(
-                    self._process_transaction_task(transaction_data)
-                )
-                self._active_tasks.add(task)
+                self._spawn(self._process_transaction_task(transaction_data), epoch)
                 return True
             else:
                 # Release transaction if in backoff
@@ -2726,6 +2894,17 @@ class ConsensusWorker:
                 done_tasks = {t for t in self._active_tasks if t.done()}
                 for task in done_tasks:
                     self._active_tasks.discard(task)
+                    # Tasks cancelled by release_in_flight() are expected;
+                    # task.result() would raise CancelledError (not an
+                    # Exception) and kill the loop.
+                    if task.cancelled():
+                        continue
+                    if isinstance(task.exception(), worker_control.WorkerFencedError):
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Stopped a task claimed before "
+                            f"a snapshot restore: {task.exception()}"
+                        )
+                        continue
                     # Handle any exceptions from completed tasks
                     try:
                         task.result()
@@ -2749,7 +2928,7 @@ class ConsensusWorker:
                 with self.get_session() as session:
                     # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)
                     recovery_counter += 1
-                    if recovery_counter >= 12:
+                    if recovery_counter >= 12 and not self.is_releasing:
                         recovery_counter = 0
                         recovered = await self.recover_stuck_transactions(session)
                         if recovered > 0:
