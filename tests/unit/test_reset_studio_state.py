@@ -400,7 +400,7 @@ async def test_claim_during_pause_is_released_not_started():
     worker = _make_worker()
     worker.pause_admission("r1", max_seconds=60)
 
-    async def claim(_session):
+    async def claim(_session, **_kwargs):
         return {"hash": "0xnew"}
 
     worker.claim_next_appeal = claim
@@ -417,10 +417,10 @@ async def test_submission_right_after_reset_is_processed():
     worker.pause_admission("r1", max_seconds=60)
     worker.resume_admission("r1")
 
-    async def no_claim(_session):
+    async def no_claim(_session, **_kwargs):
         return None
 
-    async def claim_tx(_session):
+    async def claim_tx(_session, **_kwargs):
         return {"hash": "0xpost-reset"}
 
     processed = asyncio.Event()
