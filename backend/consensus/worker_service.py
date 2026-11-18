@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 from backend.consensus.worker import ConsensusWorker
 from backend.protocol_rpc.message_handler.redis_worker_handler import (
     RedisWorkerMessageHandler,
+    STUDIO_RESET_FINISHED,
+    STUDIO_RESET_REQUEST,
 )
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
@@ -67,6 +69,52 @@ _genvm_health_last_error: str | None = None
 worker_restart_count: int = 0
 worker_last_crash_time: Optional[float] = None
 worker_permanently_failed: bool = False
+
+STUDIO_RESET_CANCEL_TIMEOUT_SECONDS = float(
+    os.environ.get("STUDIO_RESET_CANCEL_TIMEOUT_SECONDS", "15")
+)
+
+
+async def handle_studio_reset_event(
+    event_data: dict,
+    consensus_worker: Optional[ConsensusWorker],
+    msg_handler: RedisWorkerMessageHandler,
+) -> None:
+    """Worker side of the sim_resetStudioState handshake."""
+    event = event_data.get("event")
+    data = event_data.get("data") or {}
+    reset_id = data.get("reset_id")
+    if not reset_id:
+        return
+
+    if event == STUDIO_RESET_FINISHED:
+        if consensus_worker is not None:
+            consensus_worker.resume_admission(reset_id)
+        logger.info(f"Studio reset {reset_id} finished; resuming work")
+        return
+
+    if event != STUDIO_RESET_REQUEST:
+        return
+
+    logger.info(f"Received studio reset request {reset_id}")
+    if consensus_worker is None:
+        # Not started yet, so nothing is running and nothing can be claimed.
+        ack = {
+            "worker_id": msg_handler.worker_id,
+            "reset_id": reset_id,
+            "ok": True,
+            "cancelled": 0,
+            "still_running": 0,
+        }
+    else:
+        ack = await consensus_worker.handle_studio_reset_request(
+            reset_id,
+            deadline=float(data["deadline"]),
+            cancel_timeout=STUDIO_RESET_CANCEL_TIMEOUT_SECONDS,
+        )
+    if ack is not None:
+        await msg_handler.ack_studio_reset(data["ack_key"], ack)
+
 
 # GenVM Manager consecutive failure tracking
 _genvm_consecutive_failures: int = 0
@@ -303,6 +351,12 @@ async def lifespan(app: FastAPI):
 
     # Subscribe to validator events channel
     await msg_handler.subscribe_to_validator_events(handle_validator_change)
+
+    # sim_resetStudioState handshake (see redis_worker_handler for protocol)
+    async def _on_studio_reset(event_data):
+        await handle_studio_reset_event(event_data, worker, msg_handler)
+
+    await msg_handler.subscribe_to_studio_reset_events(_on_studio_reset)
 
     # Callback for graceful shutdown during K8s scale-down
     def should_shutdown_callback():

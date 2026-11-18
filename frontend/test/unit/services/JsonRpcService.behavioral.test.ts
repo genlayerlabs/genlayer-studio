@@ -69,6 +69,13 @@ describe('JsonRpcService — RPC method mapping', () => {
       );
     });
 
+    it('resetStudioState calls sim_resetStudioState', async () => {
+      await service.resetStudioState();
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_resetStudioState' }),
+      );
+    });
+
     it('cancelTransaction calls sim_cancelTransaction', async () => {
       await service.cancelTransaction('0xhash');
       expect(mockCall).toHaveBeenCalledWith(

@@ -14,6 +14,24 @@ from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import EventScope, LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
 
+# sim_resetStudioState handshake (RPC <-> consensus workers).
+#
+# Only consensus workers subscribe to STUDIO_RESET_CHANNEL, so the subscriber
+# count returned by PUBLISH is the number of workers that must acknowledge.
+#  1. RPC publishes STUDIO_RESET_REQUEST {reset_id, ack_key, deadline}.
+#  2. Each worker pauses claiming new work, cancels and drains its whole
+#     execution tree, then RPUSHes an ack {worker_id, reset_id, ok, ...} to
+#     ack_key. Requests received after `deadline` are ignored, so a delayed
+#     worker can never cancel work submitted after the reset finished.
+#  3. RPC deletes the rows only once every worker acked ok, then publishes
+#     STUDIO_RESET_FINISHED {reset_id, success}; workers resume claiming.
+#     Workers also resume on their own when the pause expires, so a lost
+#     FINISHED message cannot stall them.
+STUDIO_RESET_CHANNEL = "studio:reset"
+STUDIO_RESET_REQUEST = "studio_reset_request"
+STUDIO_RESET_FINISHED = "studio_reset_finished"
+STUDIO_RESET_ACK_TTL_SECONDS = 300
+
 
 class RedisWorkerMessageHandler(MessageHandler):
     """
@@ -52,7 +70,7 @@ class RedisWorkerMessageHandler(MessageHandler):
             "REDIS_URL", "redis://redis:6379/0"
         )
         self.redis_client: Optional[aioredis.Redis] = None
-        self._listener_task: Optional[asyncio.Task] = None
+        self._listener_tasks: list[asyncio.Task] = []
 
         logger.info(f"Worker {self.worker_id} initialized with Redis pub/sub")
 
@@ -80,24 +98,35 @@ class RedisWorkerMessageHandler(MessageHandler):
         Args:
             callback: Async function to call when validator event received
         """
+        await self._subscribe(self.VALIDATOR_CHANNEL, callback)
+
+    async def subscribe_to_studio_reset_events(self, callback):
+        """Subscribe to the sim_resetStudioState handshake channel."""
+        await self._subscribe(STUDIO_RESET_CHANNEL, callback)
+
+    async def ack_studio_reset(self, ack_key: str, ack: dict) -> None:
+        """Acknowledge a studio reset request back to the RPC instance."""
+        if not self.redis_client:
+            await self.initialize()
+        await self.redis_client.rpush(ack_key, json.dumps(ack))
+        await self.redis_client.expire(ack_key, STUDIO_RESET_ACK_TTL_SECONDS)
+
+    async def _subscribe(self, channel: str, callback):
+        """Listen on a Redis channel in the background, calling `callback`
+        with each decoded JSON message."""
         if not self.redis_client:
             await self.initialize()
 
         if not self.redis_client:
-            logger.error(
-                "Cannot subscribe to validator events: Redis client not initialized"
-            )
+            logger.error(f"Cannot subscribe to {channel}: Redis client not initialized")
             return
 
         redis_client = self.redis_client
 
         async def listener():
-            """Listen for validator events and call callback."""
             redis_pubsub = redis_client.pubsub()
-            await redis_pubsub.subscribe(self.VALIDATOR_CHANNEL)
-            logger.info(
-                f"Worker {self.worker_id} subscribed to {self.VALIDATOR_CHANNEL}"
-            )
+            await redis_pubsub.subscribe(channel)
+            logger.info(f"Worker {self.worker_id} subscribed to {channel}")
 
             try:
                 async for message in redis_pubsub.listen():
@@ -106,16 +135,14 @@ class RedisWorkerMessageHandler(MessageHandler):
                             event_data = json.loads(message["data"])
                             await callback(event_data)
                         except Exception as e:
-                            logger.error(f"Error processing validator event: {e}")
+                            logger.error(f"Error processing {channel} event: {e}")
             except asyncio.CancelledError:
-                logger.info(
-                    f"Worker {self.worker_id} validator event listener cancelled"
-                )
-                await redis_pubsub.unsubscribe(self.VALIDATOR_CHANNEL)
+                logger.info(f"Worker {self.worker_id} {channel} listener cancelled")
+                await redis_pubsub.unsubscribe(channel)
                 await redis_pubsub.close()
 
         # Start listener in background and store reference for cleanup
-        self._listener_task = asyncio.create_task(listener())
+        self._listener_tasks.append(asyncio.create_task(listener()))
 
     def _get_channel_for_event(self, log_event: LogEvent) -> str:
         """
@@ -236,13 +263,14 @@ class RedisWorkerMessageHandler(MessageHandler):
     async def close(self):
         """Clean up resources."""
         # Cancel listener task first
-        if self._listener_task is not None and not self._listener_task.done():
-            self._listener_task.cancel()
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
-            self._listener_task = None
+        for task in self._listener_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._listener_tasks = []
 
         if self.redis_client:
             await self.redis_client.close()
