@@ -214,6 +214,11 @@ class ConsensusWorker:
             {}
         )  # Track currently processing transactions by hash
         self._active_tasks: set[asyncio.Task] = set()  # Track active processing tasks
+        # > 0 while release_in_flight() is cancelling/cleaning up work. No new
+        # claims are made meanwhile — even if the restore gate has already
+        # been released (RPC timed out) — so the final sweep can only ever
+        # touch claims that existed before the release started.
+        self._releases_in_progress = 0
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
@@ -856,10 +861,26 @@ class ConsensusWorker:
         Called before the database is rewritten under the worker (snapshot
         restore). In-flight processing tasks are cancelled so they don't
         write stale results on top of the new state; their claims are
-        cleared so the RPC can see the worker has let go. New claims are
-        blocked meanwhile by the restore gate (see worker_control), not by
-        in-memory state, so this is safe even if the event arrives late.
+        cleared so the RPC can see the worker has let go.
+
+        Claims by other workers are blocked by the restore gate (see
+        worker_control). This worker additionally stops claiming until its
+        own cleanup has finished: cleanup can outlast the RPC's timeout, and
+        claims made after the gate reopens must not be swept below.
         """
+        # Set before the first await: no claim can slip in after this point.
+        self._releases_in_progress += 1
+        try:
+            await self._release_in_flight()
+        finally:
+            self._releases_in_progress -= 1
+
+    @property
+    def is_releasing(self) -> bool:
+        """True while in-flight work is being cancelled and released."""
+        return self._releases_in_progress > 0
+
+    async def _release_in_flight(self):
         tasks = [t for t in self._active_tasks if not t.done()]
         logger.info(
             f"[Worker {self.worker_id}] Releasing in-flight work; "
@@ -2746,6 +2767,11 @@ class ConsensusWorker:
         Returns:
             True if work was claimed and task spawned, False otherwise
         """
+        # Our own release cleanup still running: claiming now would hand the
+        # sweep in release_in_flight() a claim that isn't stale.
+        if self.is_releasing:
+            return False
+
         # Restore gate: while a snapshot restore holds it, no claims at all.
         # The shared lock lives until this session's transaction ends, i.e.
         # it covers the claim UPDATE that follows.
@@ -2846,7 +2872,7 @@ class ConsensusWorker:
                 with self.get_session() as session:
                     # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)
                     recovery_counter += 1
-                    if recovery_counter >= 12:
+                    if recovery_counter >= 12 and not self.is_releasing:
                         recovery_counter = 0
                         recovered = await self.recover_stuck_transactions(session)
                         if recovered > 0:

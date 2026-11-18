@@ -336,3 +336,80 @@ async def test_wait_for_claims_released_raises_on_timeout():
 async def test_publish_without_redis_returns_none(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert await worker_control.publish_worker_control("x") is None
+
+
+@pytest.mark.asyncio
+async def test_no_claims_until_release_cleanup_finishes_even_after_gate_reopens():
+    """Restore timed out (gate open again) while this worker's cancellation
+    cleanup is still running: the worker must not claim until cleanup is done,
+    and the final sweep must not touch work claimed afterwards."""
+    worker = _make_worker()
+    worker.max_parallel_txs = 2
+    events: list[str] = []
+    a_running = asyncio.Event()
+    b_running = asyncio.Event()
+    queue = [{"hash": "0xA"}]
+
+    async def claim_next_transaction(_session):
+        if not queue:
+            return None
+        tx = queue.pop(0)
+        events.append(f"claim:{tx['hash']}")
+        return tx
+
+    async def process(transaction_data):
+        tx_hash = transaction_data["hash"]
+        async with worker._transaction_context(
+            tx_hash, transaction_data, MagicMock(spec=Session)
+        ):
+            (a_running if tx_hash == "0xA" else b_running).set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Slow cleanup: outlasts the RPC's release timeout.
+                await asyncio.sleep(0.3)
+                events.append(f"cleaned:{tx_hash}")
+                raise
+
+    def release_all_claims(_session):
+        events.append("sweep")
+        return 0
+
+    with (
+        # The RPC gave up and released the gate: claims are allowed DB-side.
+        patch.object(worker_control, "claim_gate_open", return_value=True),
+        patch.object(worker, "claim_next_appeal", AsyncMock(return_value=None)),
+        patch.object(worker, "claim_next_finalization", AsyncMock(return_value=None)),
+        patch.object(worker, "claim_next_transaction", claim_next_transaction),
+        patch.object(worker, "_process_transaction_task", process),
+        patch.object(worker, "_is_in_backoff", return_value=False),
+        patch.object(worker, "recover_stuck_transactions", AsyncMock(return_value=0)),
+        patch.object(worker, "release_transaction"),
+        patch.object(worker, "release_all_claims", side_effect=release_all_claims),
+    ):
+        worker.poll_interval = 0.01
+        run_task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(a_running.wait(), 2)
+
+        release = asyncio.create_task(worker.release_in_flight())
+        await asyncio.sleep(0)
+        # New work becomes claimable (gate already reopened by the RPC).
+        queue.append({"hash": "0xB"})
+        await asyncio.sleep(0.15)  # cleanup of A still running; loop is polling
+        assert not release.done()
+        assert queue == [{"hash": "0xB"}], "claimed while releasing"
+        assert worker.is_releasing
+
+        await asyncio.wait_for(release, 2)
+        assert not worker.is_releasing
+
+        # Claiming resumes once cleanup is done, and the new work is intact.
+        await asyncio.wait_for(b_running.wait(), 2)
+        assert events == ["claim:0xA", "cleaned:0xA", "sweep", "claim:0xB"]
+        assert "0xB" in worker.current_transactions
+        b_task = next(iter(worker._active_tasks))
+        assert not b_task.done()
+
+        worker.stop()
+        b_task.cancel()
+        await asyncio.wait_for(run_task, 3)
