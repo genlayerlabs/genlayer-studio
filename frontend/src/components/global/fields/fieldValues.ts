@@ -31,7 +31,7 @@ export function getDefaultValueForType(
     return getDefaultValueForType(types[getDefaultUnionIndex(types)]!);
   switch (type) {
     case 'null':
-      return null;
+      return new AnyFieldValue('null');
     case 'bool':
       return false;
     case 'string':

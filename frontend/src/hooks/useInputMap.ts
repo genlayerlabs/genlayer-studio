@@ -31,5 +31,8 @@ export const useInputMap = () => {
     return component;
   };
 
-  return { getComponent };
+  const getComponentProps = (type: ContractParamsSchema) =>
+    getUnionTypes(type).length ? { schema: type } : {};
+
+  return { getComponent, getComponentProps };
 };

@@ -55,7 +55,7 @@ watch(selected, () => {
       v-if="selectedType !== 'null'"
       :key="selected"
       v-model="model"
-      :schema="selectedType"
+      v-bind="inputMap.getComponentProps(selectedType)"
       :name="name"
       :label="label"
       :placeholder="

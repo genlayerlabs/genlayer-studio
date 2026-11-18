@@ -98,7 +98,7 @@ onMounted(() => {
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getArg(i).val"
-        :schema="paramType"
+        v-bind="inputMap.getComponentProps(paramType)"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
@@ -113,7 +113,7 @@ onMounted(() => {
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getKwarg(paramName).val"
-        :schema="paramType"
+        v-bind="inputMap.getComponentProps(paramType)"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"

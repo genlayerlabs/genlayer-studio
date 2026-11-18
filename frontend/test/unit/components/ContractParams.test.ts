@@ -75,4 +75,44 @@ describe('union contract parameters', () => {
     expect(value()).toBeNull();
     expect(wrapper.get('select').element.value).toBe('1');
   });
+
+  it.each([
+    'string',
+    'int',
+    'bool',
+    'null',
+    { $dict: 'string' },
+  ] as ContractParamsSchema[])(
+    'does not leak schema attributes onto ordinary fields (%j)',
+    async (type) => {
+      const { wrapper } = await setup(type);
+      expect(wrapper.find('[schema]').exists()).toBe(false);
+    },
+  );
+
+  it('keeps standalone None values in textual calldata form', async () => {
+    const { wrapper, value } = await setup('null');
+    expect(wrapper.get('input').element.value).toBe('null');
+    expect(value()).toBeNull();
+    await wrapper.get('input').setValue('null');
+    expect(value()).toBeNull();
+  });
+
+  it('initializes and edits a nested union default', async () => {
+    const { wrapper, value } = await setup({
+      $or: [{ $or: ['string', 'null'] }, 'bool'],
+    });
+    expect(wrapper.findAll('select')).toHaveLength(2);
+    expect(value()).toBeNull();
+    await wrapper.findAll('select')[1]!.setValue('0');
+    expect(value()).toBe('');
+    await wrapper.get('input').setValue('nested text');
+    expect(value()).toBe('nested text');
+    expect(wrapper.find('[schema]').exists()).toBe(false);
+    await wrapper.findAll('select')[0]!.setValue('1');
+    expect(value()).toBe(false);
+    await wrapper.findAll('select')[0]!.setValue('0');
+    expect(value()).toBeNull();
+    expect(wrapper.findAll('select')[1]!.element.value).toBe('1');
+  });
 });
