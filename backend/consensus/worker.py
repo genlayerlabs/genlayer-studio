@@ -217,6 +217,10 @@ class ConsensusWorker:
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
 
+        # Monotonic deadline until which the worker must not claim new work
+        # (set while the RPC rewrites the database, e.g. snapshot restore).
+        self._paused_until: Optional[float] = None
+
         now_monotonic = time.monotonic()
         self._query_log_interval = 60.0  # seconds
         self._query_log_state = {
@@ -829,6 +833,105 @@ class ConsensusWorker:
                     exc_info=True,
                 )
             raise
+
+    def is_paused(self) -> bool:
+        """True while the worker must not claim new work."""
+        if self._paused_until is None:
+            return False
+        if time.monotonic() >= self._paused_until:
+            logger.warning(
+                f"[Worker {self.worker_id}] Pause expired without resume; "
+                f"resuming claims"
+            )
+            self._paused_until = None
+            return False
+        return True
+
+    def release_all_claims(self, session: Session) -> int:
+        """Clear blocked_at/worker_id on every transaction claimed by this worker."""
+        result = session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET blocked_at = NULL,
+                    worker_id = NULL
+                WHERE worker_id = :worker_id
+                RETURNING hash
+            """
+            ),
+            {"worker_id": self.worker_id},
+        )
+        released = len(result.fetchall())
+        session.commit()
+        return released
+
+    async def pause_and_release(self, pause_seconds: float):
+        """
+        Stop claiming new work, drop in-flight work and release its claims.
+
+        Called before the database is rewritten under the worker (snapshot
+        restore). In-flight processing tasks are cancelled so they don't
+        write stale results on top of the new state; their claims are
+        cleared so the RPC can see the worker has let go.
+
+        Args:
+            pause_seconds: Safety timeout after which claiming auto-resumes
+        """
+        self._paused_until = time.monotonic() + pause_seconds
+
+        tasks = [t for t in self._active_tasks if not t.done()]
+        logger.info(
+            f"[Worker {self.worker_id}] Pausing for up to {pause_seconds}s; "
+            f"cancelling {len(tasks)} in-flight task(s)"
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._active_tasks.difference_update(tasks)
+
+        # In-memory per-transaction state refers to the old database contents.
+        self.current_transactions.clear()
+        self._no_validators_retries.clear()
+        self._generic_error_retries.clear()
+        self._leader_crash_retries.clear()
+
+        # Cancelled tasks release their own claim; sweep anything left over.
+        try:
+            with self.get_session() as session:
+                released = self.release_all_claims(session)
+            if released:
+                logger.info(
+                    f"[Worker {self.worker_id}] Released {released} remaining claim(s)"
+                )
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to release claims while pausing: {e}",
+                exc_info=True,
+            )
+
+    def resume(self):
+        """Allow the worker to claim new work again."""
+        if self._paused_until is not None:
+            logger.info(f"[Worker {self.worker_id}] Resuming claims")
+        self._paused_until = None
+
+    async def handle_control_event(self, event_data: dict):
+        """Dispatch an event received on the worker control channel."""
+        from backend.consensus import worker_control
+
+        event = event_data.get("event")
+        data = event_data.get("data") or {}
+        if event == worker_control.PAUSE_EVENT:
+            await self.pause_and_release(
+                float(data.get("pause_seconds", worker_control.DEFAULT_PAUSE_SECONDS))
+            )
+        elif event == worker_control.RESUME_EVENT:
+            self.resume()
+        else:
+            logger.warning(
+                f"[Worker {self.worker_id}] Unknown worker control event: {event}"
+            )
 
     @asynccontextmanager
     async def _transaction_context(
@@ -2635,18 +2738,32 @@ class ConsensusWorker:
         )
         return True
 
+    def _release_if_paused(self, data: dict) -> bool:
+        """Release a claim made concurrently with a pause instead of processing it."""
+        if not self.is_paused():
+            return False
+        with self.get_session() as session:
+            self.release_transaction(session, data["hash"])
+        return True
+
     async def _process_transaction_task(self, transaction_data: dict):
         """Task wrapper for processing a transaction with its own session."""
+        if self._release_if_paused(transaction_data):
+            return
         with self.get_session() as session:
             await self.process_transaction(transaction_data, session)
 
     async def _process_finalization_task(self, finalization_data: dict):
         """Task wrapper for processing a finalization with its own session."""
+        if self._release_if_paused(finalization_data):
+            return
         with self.get_session() as session:
             await self.process_finalization(finalization_data, session)
 
     async def _process_appeal_task(self, appeal_data: dict):
         """Task wrapper for processing an appeal with its own session."""
+        if self._release_if_paused(appeal_data):
+            return
         with self.get_session() as session:
             await self.process_appeal(appeal_data, session)
 
@@ -2745,6 +2862,12 @@ class ConsensusWorker:
                         )
                     self.running = False
                     break
+
+                if self.is_paused():
+                    # Database is being rewritten (snapshot restore); don't
+                    # claim or recover anything until resumed.
+                    await asyncio.sleep(min(self.poll_interval, 1))
+                    continue
 
                 with self.get_session() as session:
                     # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)

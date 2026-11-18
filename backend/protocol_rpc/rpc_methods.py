@@ -359,11 +359,11 @@ def create_snapshot(
 
 
 @rpc.method("sim_restoreSnapshot")
-def restore_snapshot(
+async def restore_snapshot(
     snapshot_id: int,
     snapshot_manager=Depends(get_snapshot_manager),
 ) -> bool:
-    return impl.restore_snapshot(
+    return await impl.restore_snapshot(
         snapshot_manager=snapshot_manager, snapshot_id=snapshot_id
     )
 

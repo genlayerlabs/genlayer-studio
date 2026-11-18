@@ -101,6 +101,7 @@ from backend.node.genvm.base import is_valid_executor_selector
 from backend.node.genvm.origin import base_host
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
+from backend.consensus import worker_control
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 import base64
@@ -3809,11 +3810,17 @@ def create_snapshot(
 
 
 @check_forbidden_method_in_hosted_studio
-def restore_snapshot(
+async def restore_snapshot(
     snapshot_manager: SnapshotManager,
     snapshot_id: int,
 ) -> bool:
     """Restore the database state from a snapshot.
+
+    Consensus workers hold claimed transactions in memory while processing
+    them. Rewriting the transactions table underneath them would let them
+    write stale results back on top of the restored state, so workers are
+    first told to drop their in-flight work and release their claims, and
+    are only resumed once the database has been restored.
 
     Args:
         snapshot_id: ID of the snapshot to restore
@@ -3821,8 +3828,26 @@ def restore_snapshot(
     Returns:
         bool: True if the snapshot was restored, False otherwise
     """
-    reverted = snapshot_manager.restore_snapshot(snapshot_id)
-    return reverted
+    if snapshot_manager.get_snapshot(snapshot_id) is None:
+        return False
+
+    await worker_control.publish_worker_control(
+        worker_control.PAUSE_EVENT,
+        {"pause_seconds": worker_control.DEFAULT_PAUSE_SECONDS},
+    )
+    try:
+        await worker_control.wait_for_claims_released(
+            snapshot_manager.session,
+            timeout_seconds=float(
+                os.environ.get(
+                    "SNAPSHOT_RESTORE_RELEASE_TIMEOUT_SECONDS",
+                    worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        return snapshot_manager.restore_snapshot(snapshot_id)
+    finally:
+        await worker_control.publish_worker_control(worker_control.RESUME_EVENT)
 
 
 @check_forbidden_method_in_hosted_studio
