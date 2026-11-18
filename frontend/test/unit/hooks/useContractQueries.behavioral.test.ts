@@ -757,7 +757,7 @@ describe('useContractQueries — behavioral contract', () => {
 
       await expect(
         deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3),
-      ).rejects.toThrow('Error Deploying the contract');
+      ).rejects.toThrow('invalid calldata: unsupported type');
       expect(notify).toHaveBeenCalledWith({
         type: 'error',
         title: 'Error deploying contract',

@@ -530,7 +530,7 @@ export function useContractQueries() {
       return true;
     } catch (error: any) {
       console.error(error);
-      if (error instanceof Error && !error.details) {
+      if (!error?.details && error instanceof Error) {
         throw error;
       }
       throw new Error(
