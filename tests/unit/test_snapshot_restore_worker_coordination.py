@@ -413,3 +413,25 @@ async def test_no_claims_until_release_cleanup_finishes_even_after_gate_reopens(
         worker.stop()
         b_task.cancel()
         await asyncio.wait_for(run_task, 3)
+
+
+@pytest.mark.asyncio
+async def test_gate_rechecked_after_backoff_release_commits():
+    """A backoff release commits and ends the shared gate lock; the next claim
+    must re-take it (and stop if a restore grabbed the gate meanwhile)."""
+    worker = _make_worker()
+    with (
+        patch.object(worker_control, "claim_gate_open", side_effect=[True, False]),
+        patch.object(
+            worker, "claim_next_appeal", AsyncMock(return_value={"hash": "0xA"})
+        ),
+        patch.object(worker, "_is_in_backoff", return_value=True),
+        patch.object(worker, "release_transaction") as release,
+        patch.object(worker, "claim_next_finalization", new_callable=AsyncMock) as f,
+        patch.object(worker, "claim_next_transaction", new_callable=AsyncMock) as t,
+    ):
+        assert await worker._try_claim_work(MagicMock(spec=Session)) is False
+
+    release.assert_called_once()
+    f.assert_not_awaited()
+    t.assert_not_awaited()

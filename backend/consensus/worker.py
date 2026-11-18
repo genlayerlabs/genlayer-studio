@@ -1274,6 +1274,10 @@ class ConsensusWorker:
             RETURNING hash, status;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         restored_appeals = session.execute(
             restore_appeals_query,
             {
@@ -2774,7 +2778,9 @@ class ConsensusWorker:
 
         # Restore gate: while a snapshot restore holds it, no claims at all.
         # The shared lock lives until this session's transaction ends, i.e.
-        # it covers the claim UPDATE that follows.
+        # it covers the claim UPDATE that follows. It is re-checked before
+        # every claim because a backoff release below commits (ending the
+        # transaction and with it the lock).
         if not worker_control.claim_gate_open(session):
             return False
 
@@ -2791,6 +2797,8 @@ class ConsensusWorker:
                 self._active_tasks.add(task)
                 return True
             self.release_transaction(session, tx_hash)
+            if not worker_control.claim_gate_open(session):
+                return False
 
         finalization_data = await self.claim_next_finalization(
             session, exclude_hashes=self._backoff_hashes()
@@ -2808,6 +2816,8 @@ class ConsensusWorker:
                 self._active_tasks.add(task)
                 return True
             self.release_transaction(session, tx_hash)
+            if not worker_control.claim_gate_open(session):
+                return False
 
         transaction_data = await self.claim_next_transaction(session)
         if transaction_data:
