@@ -219,6 +219,8 @@ class ConsensusWorker:
         # been released (RPC timed out) — so the final sweep can only ever
         # touch claims that existed before the release started.
         self._releases_in_progress = 0
+        # Bound on waiting for cancelled tasks to finish their cleanup.
+        self.release_timeout_seconds = worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
@@ -890,14 +892,35 @@ class ConsensusWorker:
             task.cancel()
         # Drop them from the active set right away so run() never sees them.
         self._active_tasks.difference_update(tasks)
+        stuck: list[asyncio.Task] = []
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Shielded so a timeout doesn't cancel the tasks' cleanup again.
+            gathered = asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(gathered), self.release_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                stuck = [t for t in tasks if not t.done()]
+                logger.error(
+                    f"[Worker {self.worker_id}] {len(stuck)} cancelled task(s) did "
+                    f"not finish within {self.release_timeout_seconds}s; resuming, they "
+                    f"keep their claims and slots: "
+                    f"{[t.get_name() for t in stuck]}"
+                )
+                # Still running: keep counting them against capacity.
+                self._active_tasks.update(stuck)
 
         # In-memory per-transaction state refers to the old database contents.
         self.current_transactions.clear()
         self._no_validators_retries.clear()
         self._generic_error_retries.clear()
         self._leader_crash_retries.clear()
+
+        # A stuck task still holds its claim and may still write: leave the
+        # claims in place so the restore refuses to run under it.
+        if stuck:
+            return
 
         # Cancelled tasks release their own claim; sweep anything left over
         # (e.g. a task cancelled before it started running).

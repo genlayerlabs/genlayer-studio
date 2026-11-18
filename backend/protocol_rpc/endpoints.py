@@ -10,7 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial, wraps
-from typing import Any, Final, NoReturn, get_args
+from typing import Any, Final, NoReturn, Optional, get_args
 from backend.protocol_rpc.exceptions import (
     InvalidParams,
     JSONRPCError,
@@ -3822,9 +3822,10 @@ async def restore_snapshot(
     the DB (see backend/consensus/worker_control.py):
 
     1. take the restore gate, which blocks every worker claim;
-    2. tell workers to cancel in-flight work and release their claims;
-    3. wait until nothing is claimed — otherwise abort, DB untouched;
-    4. restore, then release the gate.
+    2. abort if a live claim has no worker that could release it;
+    3. tell workers to cancel in-flight work and release their claims;
+    4. wait until nothing is claimed, otherwise abort without restoring;
+    5. restore, then release the gate.
 
     Args:
         snapshot_id: ID of the snapshot to restore
@@ -3834,9 +3835,14 @@ async def restore_snapshot(
 
     Raises:
         JSONRPCError: workers could not be made to release their work; the
-            database was not modified.
+            snapshot was not restored. If this happens after step 3, workers
+            were already told to cancel in-flight work; cancelled transactions
+            are released and get processed again.
     """
-    if snapshot_manager.get_snapshot(snapshot_id) is None:
+    if (
+        await worker_control.run_blocking(snapshot_manager.get_snapshot, snapshot_id)
+        is None
+    ):
         return False
 
     timeout_seconds = float(
@@ -3846,8 +3852,10 @@ async def restore_snapshot(
         )
     )
     session = snapshot_manager.session
+    published: Optional[int] = None
     try:
         async with worker_control.restore_gate(session.get_bind(), timeout_seconds):
+            await worker_control.ensure_claims_releasable(session)
             published = await worker_control.publish_worker_control(
                 worker_control.RELEASE_IN_FLIGHT_EVENT
             )
@@ -3856,11 +3864,19 @@ async def restore_snapshot(
             await worker_control.wait_for_claims_released(
                 session, timeout_seconds if published is not None else 0
             )
-            return snapshot_manager.restore_snapshot(snapshot_id)
+            return await worker_control.run_blocking(
+                snapshot_manager.restore_snapshot, snapshot_id
+            )
     except worker_control.WorkerCoordinationError as e:
+        message = f"Snapshot not restored: {e}"
+        if published:
+            message += (
+                ". Workers were already told to cancel in-flight work; "
+                "cancelled transactions are released and will be processed again"
+            )
         raise JSONRPCError(
             code=-32000,
-            message=f"Snapshot not restored: {e}",
+            message=message,
             data={"snapshot_id": snapshot_id},
         ) from e
 

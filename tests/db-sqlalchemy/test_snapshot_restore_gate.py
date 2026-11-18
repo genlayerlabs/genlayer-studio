@@ -29,10 +29,19 @@ CONTRACT = "0xsnapshot_restore_gate_contract"
 SENDER = "0x" + "cd" * 20
 TX_A = "0x" + "a1" * 32
 TX_B = "0x" + "b2" * 32
+TX_C = "0x" + "c3" * 32
 
 
-def _insert_tx(session: Session, tx_hash: str, nonce: int, worker_id=None):
-    blocked = "NOW()" if worker_id else "NULL"
+def _insert_tx(
+    session: Session,
+    tx_hash: str,
+    nonce: int,
+    worker_id=None,
+    status: str = "PENDING",
+    blocked: str = "NOW()",
+    consensus_history: str = "NULL",
+):
+    blocked = blocked if worker_id else "NULL"
     session.execute(
         text(
             f"""
@@ -41,11 +50,12 @@ def _insert_tx(session: Session, tx_hash: str, nonce: int, worker_id=None):
                 leader_only, execution_mode, appealed, appeal_failed,
                 appeal_undetermined, appeal_leader_timeout,
                 appeal_validators_timeout, appeal_processing_time,
-                blocked_at, worker_id, recovery_count, value_credited, created_at
+                blocked_at, worker_id, recovery_count, value_credited, created_at,
+                consensus_history
             ) VALUES (
-                :hash, 'PENDING', :sender, :to, CAST('{{"calldata": "x"}}' AS jsonb),
+                :hash, :status, :sender, :to, CAST('{{"calldata": "x"}}' AS jsonb),
                 0, 2, :nonce, false, 'NORMAL', false, 0, false, false, false, 0,
-                {blocked}, :worker_id, 0, false, NOW()
+                {blocked}, :worker_id, 0, false, NOW(), {consensus_history}
             )
             """
         ),
@@ -55,6 +65,7 @@ def _insert_tx(session: Session, tx_hash: str, nonce: int, worker_id=None):
             "to": CONTRACT,
             "nonce": nonce,
             "worker_id": worker_id,
+            "status": status,
         },
     )
     session.commit()
@@ -167,19 +178,102 @@ async def test_restore_aborts_and_leaves_db_untouched_when_claims_remain(
     _insert_tx(session, TX_A, nonce=0, worker_id="unresponsive-worker")
     _insert_tx(session, TX_B, nonce=1)
 
-    with patch.object(
-        endpoints.worker_control,
-        "publish_worker_control",
-        AsyncMock(return_value=1),
+    with (
+        patch.object(
+            endpoints.worker_control,
+            "worker_control_subscribers",
+            AsyncMock(return_value=1),
+        ),
+        patch.object(
+            endpoints.worker_control,
+            "publish_worker_control",
+            AsyncMock(return_value=1),
+        ),
     ):
         with pytest.raises(JSONRPCError) as exc:
             await endpoints.restore_snapshot(manager, snapshot_id)
 
     assert TX_A in exc.value.message
+    assert "told to cancel" in exc.value.message
     assert _claim_of(session, TX_A).worker_id == "unresponsive-worker"
     assert _claim_of(session, TX_B) is not None
     with sessionmaker(bind=engine)() as ws:
         assert worker_control.claim_gate_open(ws) is True
+
+
+@pytest.mark.asyncio
+async def test_claims_no_live_worker_can_act_on_do_not_block_restore(
+    engine: Engine, session: Session, monkeypatch
+):
+    monkeypatch.setenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+    manager = SnapshotManager(session)
+    _insert_tx(session, TX_A, nonce=0)
+    snapshot_id = manager.create_snapshot().snapshot_id
+    # Lease expired, no progress since: recovery treats it as abandoned.
+    _insert_tx(
+        session,
+        TX_B,
+        nonce=1,
+        worker_id="dead-worker",
+        blocked="NOW() - INTERVAL '2 hours'",
+    )
+    # Terminal: recovery never touches it.
+    _insert_tx(session, TX_C, nonce=2, worker_id="dead-worker", status="FINALIZED")
+
+    assert worker_control.claimed_transactions(session) == []
+    publish = AsyncMock(return_value=0)
+    with patch.object(endpoints.worker_control, "publish_worker_control", publish):
+        assert await endpoints.restore_snapshot(manager, snapshot_id) is True
+
+    assert _claim_of(session, TX_A).worker_id is None
+    assert _claim_of(session, TX_B) is None
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_with_recent_progress_still_counts_as_claimed(
+    engine: Engine, session: Session, monkeypatch
+):
+    monkeypatch.setenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+    _insert_tx(
+        session,
+        TX_A,
+        nonce=0,
+        worker_id="slow-worker",
+        status="PROPOSING",
+        blocked="NOW() - INTERVAL '2 hours'",
+        consensus_history=(
+            "jsonb_build_object('current_monitoring', jsonb_build_object("
+            "'PROPOSING', EXTRACT(EPOCH FROM NOW())::double precision))"
+        ),
+    )
+
+    assert worker_control.claimed_transactions(session) == [(TX_A, "slow-worker")]
+
+
+@pytest.mark.asyncio
+async def test_restore_aborts_before_release_event_when_claim_owner_is_gone(
+    engine: Engine, session: Session
+):
+    manager = SnapshotManager(session)
+    snapshot_id = manager.create_snapshot().snapshot_id
+    _insert_tx(session, TX_A, nonce=0, worker_id="live-worker")
+    _insert_tx(session, TX_B, nonce=1, worker_id="dead-worker")
+
+    publish = AsyncMock(return_value=1)
+    with (
+        patch.object(
+            endpoints.worker_control,
+            "worker_control_subscribers",
+            AsyncMock(return_value=1),
+        ),
+        patch.object(endpoints.worker_control, "publish_worker_control", publish),
+    ):
+        with pytest.raises(JSONRPCError) as exc:
+            await endpoints.restore_snapshot(manager, snapshot_id)
+
+    publish.assert_not_awaited()
+    assert "told to cancel" not in exc.value.message
+    assert _claim_of(session, TX_B).worker_id == "dead-worker"
 
 
 @pytest.mark.asyncio

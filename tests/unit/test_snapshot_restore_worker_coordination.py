@@ -1,6 +1,8 @@
 """Snapshot restore must make workers drop in-flight work before the DB is rewritten (DXP-726)."""
 
 import asyncio
+import threading
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -165,6 +167,38 @@ async def test_closed_restore_gate_blocks_recovery_writes():
 
 
 @pytest.mark.asyncio
+async def test_release_in_flight_is_bounded_when_cleanup_hangs():
+    worker = _make_worker()
+    worker.release_timeout_seconds = 0.05
+    started = asyncio.Event()
+    unblock = asyncio.Event()
+
+    async def hung_cleanup():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await unblock.wait()  # cleanup that ignores further cancellation
+            raise
+
+    with patch.object(worker, "release_all_claims", return_value=0) as release_all:
+        task = asyncio.create_task(hung_cleanup())
+        worker._active_tasks.add(task)
+        await started.wait()
+
+        await asyncio.wait_for(worker.release_in_flight(), 2)
+
+        assert not worker.is_releasing  # claiming can resume
+        assert not task.done()
+        assert task in worker._active_tasks  # still occupies its slot
+        release_all.assert_not_called()  # its claim keeps blocking the restore
+
+        unblock.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_control_event_dispatch():
     worker = _make_worker()
     with patch.object(worker, "release_in_flight", new_callable=AsyncMock) as rel:
@@ -192,6 +226,14 @@ def _recording_gate(order):
     return gate
 
 
+def _releasable(order=None):
+    async def check(session):
+        if order is not None:
+            order.append("check")
+
+    return check
+
+
 def _manager(order=None, exists=True):
     manager = MagicMock()
     manager.get_snapshot.return_value = object() if exists else None
@@ -217,6 +259,9 @@ async def test_restore_order_gate_release_wait_restore_ungate():
     manager = _manager(order)
     with (
         patch.object(endpoints.worker_control, "restore_gate", _recording_gate(order)),
+        patch.object(
+            endpoints.worker_control, "ensure_claims_releasable", _releasable(order)
+        ),
         patch.object(endpoints.worker_control, "publish_worker_control", publish),
         patch.object(endpoints.worker_control, "wait_for_claims_released", wait),
     ):
@@ -224,6 +269,7 @@ async def test_restore_order_gate_release_wait_restore_ungate():
 
     assert order == [
         "gate",
+        "check",
         worker_control.RELEASE_IN_FLIGHT_EVENT,
         ("wait", worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS),
         "restore",
@@ -240,6 +286,9 @@ async def test_restore_aborts_without_touching_db_when_claims_remain():
     with (
         patch.object(endpoints.worker_control, "restore_gate", _recording_gate(order)),
         patch.object(
+            endpoints.worker_control, "ensure_claims_releasable", _releasable()
+        ),
+        patch.object(
             endpoints.worker_control,
             "publish_worker_control",
             AsyncMock(return_value=1),
@@ -254,8 +303,63 @@ async def test_restore_aborts_without_touching_db_when_claims_remain():
             await endpoints.restore_snapshot(manager, 7)
 
     assert "held" in exc.value.message
+    # The release event already went out: the error must not claim otherwise.
+    assert "told to cancel" in exc.value.message
     manager.restore_snapshot.assert_not_called()
     assert order == ["gate", "ungate"]
+
+
+@pytest.mark.asyncio
+async def test_restore_aborts_before_release_event_when_claims_are_unreleasable():
+    from backend.protocol_rpc import endpoints
+
+    manager = _manager()
+    publish = AsyncMock(return_value=1)
+    with (
+        patch.object(endpoints.worker_control, "restore_gate", _recording_gate([])),
+        patch.object(
+            endpoints.worker_control,
+            "ensure_claims_releasable",
+            AsyncMock(side_effect=worker_control.WorkerCoordinationError("dead")),
+        ),
+        patch.object(endpoints.worker_control, "publish_worker_control", publish),
+    ):
+        with pytest.raises(JSONRPCError) as exc:
+            await endpoints.restore_snapshot(manager, 7)
+
+    publish.assert_not_awaited()
+    assert "told to cancel" not in exc.value.message
+    manager.restore_snapshot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restore_runs_db_work_off_the_event_loop():
+    from backend.protocol_rpc import endpoints
+
+    loop_thread = threading.get_ident()
+    threads = []
+    manager = _manager()
+    manager.get_snapshot.side_effect = (
+        lambda _id: threads.append(threading.get_ident()) or object()
+    )
+    manager.restore_snapshot.side_effect = (
+        lambda _id: threads.append(threading.get_ident()) or True
+    )
+    with (
+        patch.object(endpoints.worker_control, "restore_gate", _recording_gate([])),
+        patch.object(
+            endpoints.worker_control, "ensure_claims_releasable", _releasable()
+        ),
+        patch.object(
+            endpoints.worker_control,
+            "publish_worker_control",
+            AsyncMock(return_value=1),
+        ),
+        patch.object(endpoints.worker_control, "wait_for_claims_released", AsyncMock()),
+    ):
+        assert await endpoints.restore_snapshot(manager, 7) is True
+
+    assert len(threads) == 2 and loop_thread not in threads
 
 
 @pytest.mark.asyncio
@@ -265,6 +369,9 @@ async def test_restore_does_not_wait_when_release_event_was_not_delivered():
     wait = AsyncMock()
     with (
         patch.object(endpoints.worker_control, "restore_gate", _recording_gate([])),
+        patch.object(
+            endpoints.worker_control, "ensure_claims_releasable", _releasable()
+        ),
         patch.object(
             endpoints.worker_control,
             "publish_worker_control",
@@ -330,6 +437,74 @@ async def test_wait_for_claims_released_raises_on_timeout():
             await worker_control.wait_for_claims_released(
                 MagicMock(), timeout_seconds=0, poll_interval=0
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "claimed, subscribers, ok",
+    [
+        ([], None, True),  # nothing claimed: no Redis needed
+        ([("0x1", "w1"), ("0x2", "w2")], 2, True),
+        ([("0x1", "w1"), ("0x2", "w2")], 1, False),  # some owner is gone
+        ([("0x1", None)], 3, False),  # no owner to release it
+        ([("0x1", "w1")], None, False),  # can't reach any worker
+    ],
+)
+async def test_ensure_claims_releasable(claimed, subscribers, ok):
+    subs = AsyncMock(return_value=subscribers)
+    with (
+        patch.object(worker_control, "claimed_transactions", lambda _s: claimed),
+        patch.object(worker_control, "worker_control_subscribers", subs),
+    ):
+        if ok:
+            await worker_control.ensure_claims_releasable(MagicMock())
+        else:
+            with pytest.raises(worker_control.WorkerCoordinationError):
+                await worker_control.ensure_claims_releasable(MagicMock())
+    if not claimed:
+        subs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_gate_runs_db_calls_off_the_loop_on_one_connection():
+    loop_thread = threading.get_ident()
+    calls = []
+    conn = MagicMock()
+
+    def execute(stmt, params=None):
+        calls.append((str(stmt), threading.get_ident()))
+        return MagicMock(scalar=MagicMock(return_value=True))
+
+    conn.execute.side_effect = execute
+    engine = MagicMock()
+    engine.connect.return_value = conn
+
+    async with worker_control.restore_gate(engine, timeout_seconds=1):
+        pass
+
+    engine.connect.assert_called_once()
+    assert [c[0] for c in calls] == [
+        "SELECT pg_try_advisory_lock(:key)",
+        "SELECT pg_advisory_unlock(:key)",
+    ]
+    assert all(t != loop_thread for _, t in calls)
+    conn.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_blocking_waits_for_thread_when_cancelled():
+    finished = threading.Event()
+
+    def slow():
+        time.sleep(0.2)
+        finished.set()
+
+    task = asyncio.create_task(worker_control.run_blocking(slow))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
 
 
 @pytest.mark.asyncio
