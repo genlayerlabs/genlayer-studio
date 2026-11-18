@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useContractQueries } from '@/hooks';
 import { ref, computed } from 'vue';
+import { notify } from '@kyvg/vue3-notification';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import { ArrowUpTrayIcon } from '@heroicons/vue/16/solid';
 import ContractParams from './ContractParams.vue';
@@ -24,8 +25,17 @@ const ctorMethod = computed(() => data.value.ctor);
 const emit = defineEmits(['deployed-contract']);
 
 const handleDeployContract = async () => {
-  const args = calldataArguments.value;
-  const newArgs = unfoldArgsData(args);
+  let newArgs: ReturnType<typeof unfoldArgsData>;
+  try {
+    newArgs = unfoldArgsData(calldataArguments.value);
+  } catch (error) {
+    notify({
+      title: 'Error',
+      text: (error as Error)?.message || 'Invalid constructor arguments',
+      type: 'error',
+    });
+    return;
+  }
   await deployContract(
     newArgs,
     props.executionMode,
