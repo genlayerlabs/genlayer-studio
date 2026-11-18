@@ -1,5 +1,6 @@
 # rpc/endpoints.py
 import copy
+import hmac
 import math
 import random
 import json
@@ -464,6 +465,24 @@ def sim_estimate_message_reveal_gas(
 
 
 ####### ADMIN ACCESS CONTROL #######
+def _admin_key_matches(presented: object, configured: str) -> bool:
+    """Compare a presented admin key with ``ADMIN_API_KEY`` in constant time.
+
+    ``==`` on strings returns at the first differing character, so the time a
+    wrong key takes to be rejected tells a remote caller how long a correct
+    prefix is. ``hmac.compare_digest`` does not. The values are compared as
+    UTF-8 bytes, because ``compare_digest`` only accepts ASCII ``str``; lone
+    surrogates (which JSON can carry) are passed through instead of raising, so
+    an odd key is rejected like any other wrong key.
+    """
+    if not isinstance(presented, str):
+        return False
+    return hmac.compare_digest(
+        presented.encode("utf-8", "surrogatepass"),
+        configured.encode("utf-8", "surrogatepass"),
+    )
+
+
 def require_admin_access(func):
     """
     Admin access control decorator:
@@ -480,7 +499,7 @@ def require_admin_access(func):
         # If admin key is configured, check it (works in all modes including hosted)
         if admin_api_key:
             request_key = kwargs.get("admin_key")
-            if request_key == admin_api_key:
+            if _admin_key_matches(request_key, admin_api_key):
                 # Valid admin key - proceed
                 return func(*args, **kwargs)
             # Invalid key in any mode
@@ -1036,7 +1055,7 @@ def admin_upgrade_contract_code(
 
     if needs_auth:
         # Option 1: Admin key grants full access to ANY contract
-        if admin_api_key and admin_key == admin_api_key:
+        if admin_api_key and _admin_key_matches(admin_key, admin_api_key):
             pass  # Authorized - proceed with upgrade
 
         # Option 2: Signature from deployer grants access to own contracts
@@ -1198,7 +1217,7 @@ def cancel_transaction(
 
     if needs_auth:
         # Option 1: Admin key grants full access to ANY transaction
-        if admin_api_key and admin_key == admin_api_key:
+        if admin_api_key and _admin_key_matches(admin_key, admin_api_key):
             pass  # Authorized - proceed with cancel
 
         # Option 2: Signature from tx sender grants access to own transactions
