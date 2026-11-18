@@ -176,20 +176,19 @@ async def test_live_claim_from_uncounted_worker_blocks_reset(
 
 
 @pytest.mark.asyncio
-async def test_claims_of_acked_workers_and_stale_claims_do_not_block(
+async def test_claims_of_acked_workers_do_not_block_even_when_old(
     session: Session, monkeypatch
 ):
     monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
     monkeypatch.delenv("ADMIN_API_KEY", raising=False)
 
     tp = TransactionsProcessor(session)
-    own = _insert_tx(tp)
-    stale = _insert_tx(tp)
+    recent = _insert_tx(tp)
+    old = _insert_tx(tp)
     session.commit()
-    # A claim the acked worker failed to release, and one left behind by a
-    # crashed worker long ago (already re-claimable by any worker).
-    _claim(session, own, "worker-1", "1 minute")
-    _claim(session, stale, "worker-crashed", "2 hours")
+    # Claims the acked worker failed to release: it confirmed it stopped.
+    _claim(session, recent, "worker-1", "1 minute")
+    _claim(session, old, "worker-1", "2 hours")
 
     with patch(
         "backend.protocol_rpc.endpoints._studio_reset_redis",
@@ -198,4 +197,80 @@ async def test_claims_of_acked_workers_and_stale_claims_do_not_block(
         result = await reset_studio_state(session=session)
 
     assert result["deleted_transactions"] == 2
+    assert session.query(Transactions).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_of_running_unacked_task_blocks_reset(
+    session: Session, monkeypatch
+):
+    """Regression (audit #3): a claim older than TRANSACTION_TIMEOUT_MINUTES
+    whose task is still running (fresh monitoring progress) must not be
+    treated as abandoned. Nothing may be deleted."""
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    tp = TransactionsProcessor(session)
+    running = _insert_tx(tp)
+    session.commit()
+    AccountsManager(session).create_new_account()
+    session.commit()
+    _claim(session, running, "worker-unacked", "2 hours")
+    session.execute(
+        text(
+            "UPDATE transactions SET consensus_history = jsonb_build_object("
+            "'current_monitoring', jsonb_build_object("
+            "'PROPOSING', extract(epoch from now()))) WHERE hash = :h"
+        ),
+        {"h": running},
+    )
+    session.commit()
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        with pytest.raises(JSONRPCError, match="worker-unacked"):
+            await reset_studio_state(session=session)
+
+    assert session.query(Transactions).count() == 1
+    assert session.query(CurrentState).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_blocks_until_recovery_clears_it(
+    session: Session, monkeypatch
+):
+    """An expired claim with no progress may belong to a dead worker, but the
+    reset still cannot prove it stopped; it proceeds once stuck-transaction
+    recovery has released the claim."""
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    tp = TransactionsProcessor(session)
+    stale = _insert_tx(tp)
+    session.commit()
+    _claim(session, stale, "worker-gone", "2 hours")
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        with pytest.raises(JSONRPCError, match="worker-gone"):
+            await reset_studio_state(session=session)
+    assert session.query(Transactions).count() == 1
+
+    # What recover_stuck_transactions does to an abandoned claim.
+    session.execute(
+        text(
+            "UPDATE transactions SET worker_id = NULL, blocked_at = NULL "
+            "WHERE hash = :h"
+        ),
+        {"h": stale},
+    )
+    session.commit()
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        result = await reset_studio_state(session=session)
+    assert result["deleted_transactions"] == 1
     assert session.query(Transactions).count() == 0

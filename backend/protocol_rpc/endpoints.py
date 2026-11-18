@@ -528,11 +528,6 @@ def clear_db_tables(session: Session, tables: list) -> None:
 STUDIO_RESET_ACK_TIMEOUT_SECONDS = float(
     os.environ.get("STUDIO_RESET_ACK_TIMEOUT_SECONDS", "30")
 )
-# Claims older than this are already treated as abandoned by the workers'
-# own claim queries (they may be re-claimed), so they don't block a reset.
-STUDIO_RESET_CLAIM_TIMEOUT_MINUTES = int(
-    os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30")
-)
 STUDIO_RESET_LOCK_KEY = "studio:reset:lock"
 _RELEASE_LOCK_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -592,9 +587,16 @@ def _fence_and_find_live_claims(
 
     Takes an EXCLUSIVE lock on ``transactions`` for the rest of the DB
     transaction: workers can no longer claim (claims are UPDATEs) until the
-    rows are deleted and committed. Then returns live claims held by workers
-    that did not confirm they stopped; any such claim means a worker is still
-    running and the reset must not delete anything.
+    rows are deleted and committed. Then returns every claim held by a worker
+    that did not confirm it stopped; any such claim means that worker may
+    still be running and the reset must not delete anything.
+
+    Claim age is deliberately ignored. An expired claim (older than
+    TRANSACTION_TIMEOUT_MINUTES) only means the lease may be taken over; the
+    execution holding it can still be running, which is why stuck-transaction
+    recovery also requires stale progress before clearing a claim. Claims of
+    workers that are really gone are cleared by that recovery, after which
+    the reset can proceed.
     """
     session.execute(text("LOCK TABLE transactions IN EXCLUSIVE MODE"))
     rows = session.execute(
@@ -602,11 +604,8 @@ def _fence_and_find_live_claims(
             """
             SELECT hash, worker_id FROM transactions
             WHERE worker_id IS NOT NULL
-              AND blocked_at IS NOT NULL
-              AND blocked_at > NOW() - CAST(:timeout AS INTERVAL)
             """
-        ),
-        {"timeout": f"{STUDIO_RESET_CLAIM_TIMEOUT_MINUTES} minutes"},
+        )
     ).all()
     return [
         (row.hash, row.worker_id)
@@ -710,9 +709,12 @@ async def reset_studio_state(session: Session, admin_key: str | None = None) -> 
                     session.rollback()  # drop the table lock right away
                     workers = sorted({w for _, w in live_claims})
                     raise _studio_reset_error(
-                        f"{len(live_claims)} transactions are still being "
-                        "processed by consensus workers that did not take part "
-                        f"in the reset: {', '.join(workers)}."
+                        f"{len(live_claims)} transactions are still claimed by "
+                        "consensus workers that did not confirm they stopped: "
+                        f"{', '.join(workers)}. If those workers no longer "
+                        "exist, stuck-transaction recovery releases their "
+                        "claims once TRANSACTION_TIMEOUT_MINUTES pass without "
+                        "progress."
                     )
 
                 deleted_transactions = session.query(Transactions).delete(
