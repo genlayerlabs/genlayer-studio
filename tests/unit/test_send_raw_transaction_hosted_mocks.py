@@ -1,12 +1,14 @@
-"""DXP-666: hosted studio must reject transactions that use mocked validators."""
+"""DXP-666: hosted studio must not let callers introduce mocked validators."""
 
 import os
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend.protocol_rpc.endpoints import (
     _sim_config_has_mocked_validators,
+    create_validator,
     send_raw_transaction,
 )
 from backend.protocol_rpc.exceptions import JSONRPCError
@@ -100,3 +102,33 @@ def test_allowed_cases_proceed(env, sim_config):
     ):
         with pytest.raises(_Proceeded):
             _call(sim_config)
+
+
+@pytest.mark.asyncio
+async def test_hosted_blocks_create_validator_with_mock_response():
+    """sim_createValidator must not let mocked validators into the shared registry."""
+    registry = SimpleNamespace(create_validator=AsyncMock())
+    validators_manager = SimpleNamespace(registry=registry)
+    env = {"VITE_IS_HOSTED": "true"}
+    with patch.dict(os.environ, env), patch(
+        "backend.protocol_rpc.endpoints.AccountsManager"
+    ) as accounts_manager:
+        os.environ.pop("ADMIN_API_KEY", None)
+        with pytest.raises(JSONRPCError) as exc_info:
+            await create_validator(
+                MagicMock(),
+                validators_manager,
+                stake=1,
+                provider="openai",
+                model="gpt-4o",
+                config={},
+                plugin="openai-compatible",
+                plugin_config={
+                    "api_key_env_var": "OPENAIKEY",
+                    "api_url": None,
+                    "mock_response": {"response": {"a": "b"}},
+                },
+            )
+    assert exc_info.value.code == -32000
+    accounts_manager.assert_not_called()
+    registry.create_validator.assert_not_awaited()
