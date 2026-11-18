@@ -1,3 +1,5 @@
+import UnionField from '@/components/global/fields/UnionField.vue';
+import { getUnionTypes } from '@/components/global/fields/fieldValues';
 import AnyField from '@/components/global/fields/AnyField.vue';
 import StringField from '@/components/global/fields/StringField.vue';
 import IntegerField from '@/components/global/fields/IntegerField.vue';
@@ -13,6 +15,7 @@ export const InputTypesMap: { [k: string]: any } = {
 
 export const useInputMap = () => {
   const getComponent = (type: ContractParamsSchema) => {
+    if (getUnionTypes(type).length) return UnionField;
     if (typeof type !== 'string') {
       type = 'any';
     }

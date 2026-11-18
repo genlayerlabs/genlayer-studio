@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { useInputMap } from '@/hooks';
-import type {
-  ContractMethodBase,
-  ContractParamsSchema,
-} from 'genlayer-js/types';
+import type { ContractMethodBase } from 'genlayer-js/types';
 import { onMounted, ref, watch } from 'vue';
-import { AnyFieldValue } from '../global/fields/AnyFieldValue';
+import { getDefaultValueForType } from '../global/fields/fieldValues';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ArgData } from './ContractParams';
 
@@ -26,19 +23,6 @@ function getArg(index: number) {
 function getKwarg(key: string) {
   return args.value!.kwargs[key]!;
 }
-
-const getDefaultValueForType = (type: ContractParamsSchema) => {
-  switch (type) {
-    case 'bool':
-      return false;
-    case 'string':
-      return '';
-    case 'int':
-      return 0;
-    default:
-      return new AnyFieldValue('');
-  }
-};
 
 const setInputParams = (method: ContractMethodBase | undefined) => {
   if (method === undefined) {
@@ -94,7 +78,9 @@ onMounted(() => {
 <template>
   <EmptyListPlaceholder
     v-if="
-      methodBase === undefined || args === undefined || args.args.length === 0
+      methodBase === undefined ||
+      args === undefined ||
+      (args.args.length === 0 && Object.keys(args.kwargs).length === 0)
     "
   >
     No parameters.
@@ -112,6 +98,7 @@ onMounted(() => {
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getArg(i).val"
+        :schema="paramType"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
@@ -126,6 +113,7 @@ onMounted(() => {
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getKwarg(paramName).val"
+        :schema="paramType"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
