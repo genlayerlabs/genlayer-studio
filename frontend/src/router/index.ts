@@ -1,9 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import SimulatorView from '@/views/Simulator/SimulatorView.vue';
-import ContractsView from '@/views/Simulator/ContractsView.vue';
-import RunDebugView from '@/views/Simulator/RunDebugView.vue';
-import ValidatorsView from '@/views/Simulator/ValidatorsView.vue';
-import SettingsView from '@/views/Simulator/SettingsView.vue';
+import SimulatorView from '@/views/simulator/SimulatorView.vue';
+import ContractsView from '@/views/simulator/ContractsView.vue';
+import RunDebugView from '@/views/simulator/RunDebugView.vue';
+import ValidatorsView from '@/views/simulator/ValidatorsView.vue';
+import SettingsView from '@/views/simulator/SettingsView.vue';
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
