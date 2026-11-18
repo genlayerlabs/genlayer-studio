@@ -322,6 +322,10 @@ async def lifespan(app: FastAPI):
         should_shutdown=should_shutdown_callback,
     )
 
+    # Subscribe to control events (pause + release in-flight work while the
+    # RPC restores a snapshot, then resume)
+    await msg_handler.subscribe_to_worker_control_events(worker.handle_control_event)
+
     # Get restart configuration from environment
     max_restarts = int(os.environ.get("WORKER_MAX_RESTARTS", "5"))
     restart_window_seconds = int(os.environ.get("WORKER_RESTART_WINDOW_SECONDS", "300"))
