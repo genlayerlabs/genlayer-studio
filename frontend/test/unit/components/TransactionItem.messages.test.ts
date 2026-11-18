@@ -57,11 +57,13 @@ const parentTransaction = {
   },
 };
 
+// The real Modal is teleported (headless UI Dialog), so clicks inside it never
+// bubble to the list row; .stop mirrors that for the inline stub.
 const ModalStub = {
   props: ['open'],
   emits: ['close'],
   template:
-    '<section v-if="open" class="modal"><button class="modal-close" @click="$emit(\'close\')" /><slot name="title" /><slot name="info" /><slot /></section>',
+    '<section v-if="open" class="modal"><button class="modal-close" @click.stop="$emit(\'close\')" /><slot name="title" /><slot name="info" /><slot /></section>',
 };
 
 function mountItem(transaction: any = parentTransaction) {
@@ -356,6 +358,66 @@ describe('TransactionItem messages (triggered transactions)', () => {
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(getTransactionMock).toHaveBeenCalledTimes(2);
+      expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
+    });
+    function parentCloseButton(wrapper: ReturnType<typeof mountItem>) {
+      // The first close button belongs to the parent (root) modal.
+      return wrapper.findAll('.modal-close')[0]!;
+    }
+
+    it('abandons the followed message when the parent closes during the initial fetch', async () => {
+      const initial = deferred<typeof pendingChild>();
+      getTransactionMock
+        .mockReturnValueOnce(initial.promise)
+        .mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await wrapper.trigger('click');
+      await wrapper
+        .find(`[data-testid="triggered-transaction-link-${childHash}"]`)
+        .trigger('click');
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+
+      await parentCloseButton(wrapper).trigger('click');
+      expect(wrapper.find('.modal').exists()).toBe(false);
+
+      initial.resolve(pendingChild);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+
+      // Reopening the parent does not resurrect the abandoned child, and its
+      // messages can be followed again.
+      await wrapper.trigger('click');
+      expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
+      const link = wrapper.find(
+        `[data-testid="triggered-transaction-link-${childHash}"]`,
+      );
+      expect(link.attributes('disabled')).toBeUndefined();
+
+      await link.trigger('click');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+      expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(1);
+    });
+
+    it('stops polling the followed message when the parent closes', async () => {
+      const poll = deferred<typeof pendingChild>();
+      getTransactionMock
+        .mockResolvedValueOnce(pendingChild)
+        .mockReturnValueOnce(poll.promise)
+        .mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await openChild(wrapper);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+
+      await parentCloseButton(wrapper).trigger('click');
+      poll.resolve(pendingChild);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+
+      await wrapper.trigger('click');
       expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
     });
   });

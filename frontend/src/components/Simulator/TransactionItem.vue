@@ -95,6 +95,9 @@ const openDetailsModal = () => {
 
 const closeDetailsModal = () => {
   isDetailsModalOpen.value = false;
+  // Abandon any followed message: drop its pending fetch and stop polling,
+  // so reopening this modal does not resurrect it.
+  closeTriggeredTransaction();
   emit('close');
 };
 
@@ -189,11 +192,12 @@ function scheduleTriggeredTransactionPoll() {
   }, TRIGGERED_TRANSACTION_POLL_INTERVAL_MS);
 }
 
-const closeTriggeredTransaction = () => {
+function closeTriggeredTransaction() {
   triggeredRequestGeneration += 1;
   stopTriggeredTransactionPolling();
   selectedTriggeredTransaction.value = null;
-};
+  loadingTriggeredHash.value = null;
+}
 
 onBeforeUnmount(() => {
   isTornDown = true;
@@ -224,7 +228,10 @@ const openTriggeredTransaction = async (hash: `0x${string}`) => {
       text: e?.message ?? 'Unable to load triggered transaction',
     });
   } finally {
-    loadingTriggeredHash.value = null;
+    // A stale request must not clear the loading state of a newer one.
+    if (generation === triggeredRequestGeneration) {
+      loadingTriggeredHash.value = null;
+    }
   }
 };
 const currentTimestamp = useTimestamp({ interval: 1000 });
