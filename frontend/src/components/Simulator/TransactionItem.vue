@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onBeforeUnmount } from 'vue';
 import type {
   StudioExecutionFeeReport,
   StudioExecutionFeeReportMessage,
   StudioFeeAccounting,
   TransactionItem,
 } from '@/types';
+import type { TransactionHash } from 'genlayer-js/types';
 import TransactionStatusBadge from '@/components/Simulator/TransactionStatusBadge.vue';
+// Self-reference: a triggered transaction (message) opens its own details modal.
+import TriggeredTransactionItem from '@/components/Simulator/TransactionItem.vue';
 import { useTimeAgo, useTimestamp } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
@@ -71,13 +74,166 @@ const transactionsStore = useTransactionsStore();
 const props = defineProps<{
   transaction: TransactionItem;
   finalityWindow: number;
+  // Render only the details modal (opened on mount), without the list row.
+  // Used to show the details of a triggered transaction (message).
+  detailsOnly?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
   getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0),
 );
 
-const isDetailsModalOpen = ref(false);
+const isDetailsModalOpen = ref(Boolean(props.detailsOnly));
+
+const openDetailsModal = () => {
+  isDetailsModalOpen.value = true;
+};
+
+const closeDetailsModal = () => {
+  isDetailsModalOpen.value = false;
+  // Abandon any followed message: drop its pending fetch and stop polling,
+  // so reopening this modal does not resurrect it.
+  closeTriggeredTransaction();
+  emit('close');
+};
+
+// Messages emitted by this transaction (child transactions it triggered).
+const triggeredTransactionHashes = computed<`0x${string}`[]>(() => {
+  const triggered = props.transaction?.data?.triggered_transactions;
+  if (!Array.isArray(triggered)) return [];
+  return triggered.filter(
+    (hash): hash is `0x${string}` =>
+      typeof hash === 'string' && hash.length > 0,
+  );
+});
+
+const selectedTriggeredTransaction = ref<TransactionItem | null>(null);
+const loadingTriggeredHash = ref<string | null>(null);
+
+function triggeredTransactionType(type: unknown): TransactionItem['type'] {
+  if (type === 1 || type === '1' || type === 'deploy') return 'deploy';
+  if (type === 3 || type === '3' || type === 'upgrade') return 'upgrade';
+  return 'method';
+}
+
+function toTriggeredTransactionItem(
+  hash: `0x${string}`,
+  tx: any,
+): TransactionItem {
+  return {
+    hash,
+    type: triggeredTransactionType(tx.type),
+    statusName: tx.statusName ?? tx.status_name ?? tx.status,
+    contractAddress: tx.to_address ?? tx.recipient ?? '',
+    localContractId: '',
+    data: { ...tx, hash },
+  };
+}
+
+// A followed message is fetched on demand, so the store's transaction
+// listener does not update it. Poll it while its modal is open until it can
+// no longer change (status, result or newly emitted messages).
+const TRIGGERED_TRANSACTION_POLL_INTERVAL_MS = 3_000;
+const TRIGGERED_TRANSACTION_FINAL_STATUSES = new Set(['FINALIZED', 'CANCELED']);
+let triggeredPollTimer: ReturnType<typeof setTimeout> | null = null;
+// Bumped whenever outstanding triggered-transaction requests become stale
+// (modal closed, another message opened, component unmounted). Responses
+// carrying an older generation are dropped and never schedule a poll.
+let triggeredRequestGeneration = 0;
+let isTornDown = false;
+
+function isCurrentTriggeredRequest(generation: number) {
+  return !isTornDown && generation === triggeredRequestGeneration;
+}
+
+function stopTriggeredTransactionPolling() {
+  if (triggeredPollTimer !== null) {
+    clearTimeout(triggeredPollTimer);
+    triggeredPollTimer = null;
+  }
+}
+
+function scheduleTriggeredTransactionPoll() {
+  stopTriggeredTransactionPolling();
+  const current = selectedTriggeredTransaction.value;
+  if (
+    isTornDown ||
+    !current ||
+    TRIGGERED_TRANSACTION_FINAL_STATUSES.has(String(current.statusName))
+  ) {
+    return;
+  }
+  const hash = current.hash;
+  const generation = triggeredRequestGeneration;
+  triggeredPollTimer = setTimeout(async () => {
+    triggeredPollTimer = null;
+    try {
+      const tx: any = await transactionsStore.getTransaction(
+        hash as TransactionHash,
+      );
+      // Ignore the response if the modal was closed, switched or unmounted.
+      if (!isCurrentTriggeredRequest(generation)) return;
+      if (tx) {
+        selectedTriggeredTransaction.value = toTriggeredTransactionItem(
+          hash,
+          tx,
+        );
+      }
+    } catch (e) {
+      if (!isCurrentTriggeredRequest(generation)) return;
+      // Keep the last snapshot and retry on the next tick.
+      console.warn('Error refreshing triggered transaction', e);
+    }
+    scheduleTriggeredTransactionPoll();
+  }, TRIGGERED_TRANSACTION_POLL_INTERVAL_MS);
+}
+
+function closeTriggeredTransaction() {
+  triggeredRequestGeneration += 1;
+  stopTriggeredTransactionPolling();
+  selectedTriggeredTransaction.value = null;
+  loadingTriggeredHash.value = null;
+}
+
+onBeforeUnmount(() => {
+  isTornDown = true;
+  triggeredRequestGeneration += 1;
+  stopTriggeredTransactionPolling();
+});
+
+const openTriggeredTransaction = async (hash: `0x${string}`) => {
+  if (loadingTriggeredHash.value) return;
+  loadingTriggeredHash.value = hash;
+  triggeredRequestGeneration += 1;
+  const generation = triggeredRequestGeneration;
+  try {
+    const tx: any = await transactionsStore.getTransaction(
+      hash as TransactionHash,
+    );
+    if (!isCurrentTriggeredRequest(generation)) return;
+    if (!tx) {
+      throw new Error(`Transaction ${hash} not found`);
+    }
+    selectedTriggeredTransaction.value = toTriggeredTransactionItem(hash, tx);
+    scheduleTriggeredTransactionPoll();
+  } catch (e: any) {
+    if (!isCurrentTriggeredRequest(generation)) return;
+    notify({
+      type: 'error',
+      title: 'Error loading transaction',
+      text: e?.message ?? 'Unable to load triggered transaction',
+    });
+  } finally {
+    // A stale request must not clear the loading state of a newer one.
+    if (generation === triggeredRequestGeneration) {
+      loadingTriggeredHash.value = null;
+    }
+  }
+};
 const currentTimestamp = useTimestamp({ interval: 1000 });
 
 const timeThreshold = 6; // Number of hours after which the date should be displayed instead of time ago
@@ -692,109 +848,115 @@ const badgeColorClass = computed(() => {
 
 <template>
   <div
-    class="group flex cursor-pointer flex-row items-center justify-between gap-2 rounded p-0.5 pl-1 hover:bg-gray-100 dark:hover:bg-zinc-700"
-    @click="isDetailsModalOpen = true"
+    :class="
+      detailsOnly
+        ? ''
+        : 'group flex cursor-pointer flex-row items-center justify-between gap-2 rounded p-0.5 pl-1 hover:bg-gray-100 dark:hover:bg-zinc-700'
+    "
+    @click="openDetailsModal"
   >
-    <div class="flex flex-row text-xs text-gray-500 dark:text-gray-400">
-      <span class="font-mono">{{ shortHash }}</span>
-      <span class="font-normal">...</span>
-    </div>
-
-    <div class="grow truncate text-left text-[11px] font-medium">
-      {{
-        transaction.type === 'method'
-          ? transaction.decodedData?.functionName
-          : transaction.type === 'upgrade'
-            ? 'Upgrade'
-            : 'Deploy'
-      }}
-    </div>
-
-    <div class="hidden flex-row items-center gap-1 group-hover:flex">
-      <CopyTextButton
-        :text="transaction.hash"
-        v-tooltip="'Copy transaction hash'"
-        class="h-4 w-4"
-      />
-
-      <button
-        @click.stop="nodeStore.searchFilter = transaction.hash"
-        class="active:scale-90"
-      >
-        <FilterIcon
-          v-tooltip="'Filter logs by hash'"
-          class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-        />
-      </button>
-
-      <a
-        :href="`${explorerUrl}/tx/${transaction.hash}`"
-        target="_blank"
-        @click.stop
-        v-tooltip="'View in Explorer'"
-        class="active:scale-90"
-      >
-        <ExternalLink
-          class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-        />
-      </a>
-    </div>
-
-    <div class="flex items-center justify-between gap-2 p-1">
-      <Loader
-        :size="15"
-        v-if="
-          transaction.statusName !== 'FINALIZED' &&
-          transaction.statusName !== 'ACCEPTED' &&
-          transaction.statusName !== 'UNDETERMINED' &&
-          transaction.statusName !== 'LEADER_TIMEOUT' &&
-          transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
-          transaction.statusName !== 'CANCELED'
-        "
-      />
-
-      <div @click.stop="">
-        <Btn
-          v-if="canCancel"
-          @click="handleCancelTransaction"
-          tiny
-          class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
-          :data-testid="`cancel-transaction-btn-${transaction.hash}`"
-          :loading="isCancelling"
-          :disabled="isCancelling"
-        >
-          <div class="flex items-center gap-1">
-            {{ isCancelling ? 'CANCELLING...' : 'CANCEL' }}
-            <XCircleIcon class="h-2.5 w-2.5" />
-          </div>
-        </Btn>
+    <template v-if="!detailsOnly">
+      <div class="flex flex-row text-xs text-gray-500 dark:text-gray-400">
+        <span class="font-mono">{{ shortHash }}</span>
+        <span class="font-normal">...</span>
       </div>
 
-      <div @click.stop="">
-        <Btn
-          v-if="canAppeal"
-          @click="handleSetTransactionAppeal"
-          tiny
-          class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
-          :data-testid="`appeal-transaction-btn-${transaction.hash}`"
-          :loading="isAppealed"
-          :disabled="isAppealed"
-        >
-          <div class="flex items-center gap-1">
-            {{ isAppealed ? 'APPEALED...' : 'APPEAL' }}
-            <GavelIcon class="h-2.5 w-2.5" />
-          </div>
-        </Btn>
+      <div class="grow truncate text-left text-[11px] font-medium">
+        {{
+          transaction.type === 'method'
+            ? transaction.decodedData?.functionName
+            : transaction.type === 'upgrade'
+              ? 'Upgrade'
+              : 'Deploy'
+        }}
       </div>
 
-      <TransactionStatusBadge
-        :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
-      >
-        {{ transaction.statusName }}
-      </TransactionStatusBadge>
-    </div>
+      <div class="hidden flex-row items-center gap-1 group-hover:flex">
+        <CopyTextButton
+          :text="transaction.hash"
+          v-tooltip="'Copy transaction hash'"
+          class="h-4 w-4"
+        />
 
-    <Modal :open="isDetailsModalOpen" @close="isDetailsModalOpen = false" wide>
+        <button
+          @click.stop="nodeStore.searchFilter = transaction.hash"
+          class="active:scale-90"
+        >
+          <FilterIcon
+            v-tooltip="'Filter logs by hash'"
+            class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+          />
+        </button>
+
+        <a
+          :href="`${explorerUrl}/tx/${transaction.hash}`"
+          target="_blank"
+          @click.stop
+          v-tooltip="'View in Explorer'"
+          class="active:scale-90"
+        >
+          <ExternalLink
+            class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+          />
+        </a>
+      </div>
+
+      <div class="flex items-center justify-between gap-2 p-1">
+        <Loader
+          :size="15"
+          v-if="
+            transaction.statusName !== 'FINALIZED' &&
+            transaction.statusName !== 'ACCEPTED' &&
+            transaction.statusName !== 'UNDETERMINED' &&
+            transaction.statusName !== 'LEADER_TIMEOUT' &&
+            transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
+            transaction.statusName !== 'CANCELED'
+          "
+        />
+
+        <div @click.stop="">
+          <Btn
+            v-if="canCancel"
+            @click="handleCancelTransaction"
+            tiny
+            class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
+            :data-testid="`cancel-transaction-btn-${transaction.hash}`"
+            :loading="isCancelling"
+            :disabled="isCancelling"
+          >
+            <div class="flex items-center gap-1">
+              {{ isCancelling ? 'CANCELLING...' : 'CANCEL' }}
+              <XCircleIcon class="h-2.5 w-2.5" />
+            </div>
+          </Btn>
+        </div>
+
+        <div @click.stop="">
+          <Btn
+            v-if="canAppeal"
+            @click="handleSetTransactionAppeal"
+            tiny
+            class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
+            :data-testid="`appeal-transaction-btn-${transaction.hash}`"
+            :loading="isAppealed"
+            :disabled="isAppealed"
+          >
+            <div class="flex items-center gap-1">
+              {{ isAppealed ? 'APPEALED...' : 'APPEAL' }}
+              <GavelIcon class="h-2.5 w-2.5" />
+            </div>
+          </Btn>
+        </div>
+
+        <TransactionStatusBadge
+          :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
+        >
+          {{ transaction.statusName }}
+        </TransactionStatusBadge>
+      </div>
+    </template>
+
+    <Modal :open="isDetailsModalOpen" @close="closeDetailsModal" wide>
       <template #title>
         <div class="flex flex-row items-center justify-between gap-2">
           <div>
@@ -863,6 +1025,42 @@ const badgeColorClass = computed(() => {
               </TransactionStatusBadge>
             </div>
           </div>
+        </ModalSection>
+
+        <ModalSection v-if="triggeredTransactionHashes.length > 0">
+          <template #title>Messages</template>
+
+          <ul
+            class="flex flex-col gap-1 text-xs"
+            data-testid="triggered-transactions"
+          >
+            <li
+              v-for="hash in triggeredTransactionHashes"
+              :key="hash"
+              class="flex flex-row items-center gap-2"
+            >
+              <button
+                type="button"
+                class="font-mono text-primary underline-offset-2 hover:underline disabled:opacity-60 dark:text-white"
+                :data-testid="`triggered-transaction-link-${hash}`"
+                :disabled="loadingTriggeredHash !== null"
+                @click="openTriggeredTransaction(hash)"
+              >
+                {{ hash }}
+              </button>
+              <Loader v-if="loadingTriggeredHash === hash" :size="12" />
+              <CopyTextButton :text="hash" />
+            </li>
+          </ul>
+
+          <TriggeredTransactionItem
+            v-if="selectedTriggeredTransaction"
+            :key="selectedTriggeredTransaction.hash"
+            :transaction="selectedTriggeredTransaction"
+            :finalityWindow="finalityWindow"
+            detailsOnly
+            @close="closeTriggeredTransaction"
+          />
         </ModalSection>
 
         <ModalSection v-if="feeAccounting">
