@@ -278,5 +278,85 @@ describe('TransactionItem messages (triggered transactions)', () => {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(getTransactionMock).toHaveBeenCalledTimes(1);
     });
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+
+    it('does not start polling when unmounted during the initial fetch', async () => {
+      const initial = deferred<typeof pendingChild>();
+      getTransactionMock
+        .mockReturnValueOnce(initial.promise)
+        .mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await wrapper.trigger('click');
+      await wrapper
+        .find(`[data-testid="triggered-transaction-link-${childHash}"]`)
+        .trigger('click');
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+
+      wrapper.unmount();
+      initial.resolve(pendingChild);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['resolves', (d: ReturnType<typeof deferred>) => d.resolve(pendingChild)],
+      [
+        'rejects',
+        (d: ReturnType<typeof deferred>) => d.reject(new Error('network')),
+      ],
+    ])(
+      'does not resume polling when unmounted while a poll is in flight and it %s',
+      async (_label, settle) => {
+        const poll = deferred<typeof pendingChild>();
+        getTransactionMock
+          .mockResolvedValueOnce(pendingChild)
+          .mockReturnValueOnce(poll.promise)
+          .mockResolvedValue(pendingChild);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const wrapper = mountItem();
+        await openChild(wrapper);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(getTransactionMock).toHaveBeenCalledTimes(2);
+
+        wrapper.unmount();
+        settle(poll as ReturnType<typeof deferred>);
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(getTransactionMock).toHaveBeenCalledTimes(2);
+        warn.mockRestore();
+      },
+    );
+
+    it('does not resume polling when the modal is closed while a poll is in flight', async () => {
+      const poll = deferred<typeof pendingChild>();
+      getTransactionMock
+        .mockResolvedValueOnce(pendingChild)
+        .mockReturnValueOnce(poll.promise)
+        .mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await openChild(wrapper);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+
+      const child = wrapper.findAllComponents(TransactionItem)[0]!;
+      await child.findAll('.modal-close')[0]!.trigger('click');
+      poll.resolve(pendingChild);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+      expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
+    });
   });
 });

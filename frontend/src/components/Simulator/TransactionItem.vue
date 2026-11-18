@@ -137,6 +137,15 @@ function toTriggeredTransactionItem(
 const TRIGGERED_TRANSACTION_POLL_INTERVAL_MS = 3_000;
 const TRIGGERED_TRANSACTION_FINAL_STATUSES = new Set(['FINALIZED', 'CANCELED']);
 let triggeredPollTimer: ReturnType<typeof setTimeout> | null = null;
+// Bumped whenever outstanding triggered-transaction requests become stale
+// (modal closed, another message opened, component unmounted). Responses
+// carrying an older generation are dropped and never schedule a poll.
+let triggeredRequestGeneration = 0;
+let isTornDown = false;
+
+function isCurrentTriggeredRequest(generation: number) {
+  return !isTornDown && generation === triggeredRequestGeneration;
+}
 
 function stopTriggeredTransactionPolling() {
   if (triggeredPollTimer !== null) {
@@ -149,20 +158,22 @@ function scheduleTriggeredTransactionPoll() {
   stopTriggeredTransactionPolling();
   const current = selectedTriggeredTransaction.value;
   if (
+    isTornDown ||
     !current ||
     TRIGGERED_TRANSACTION_FINAL_STATUSES.has(String(current.statusName))
   ) {
     return;
   }
   const hash = current.hash;
+  const generation = triggeredRequestGeneration;
   triggeredPollTimer = setTimeout(async () => {
     triggeredPollTimer = null;
     try {
       const tx: any = await transactionsStore.getTransaction(
         hash as TransactionHash,
       );
-      // Ignore the response if the modal was closed or switched meanwhile.
-      if (selectedTriggeredTransaction.value?.hash !== hash) return;
+      // Ignore the response if the modal was closed, switched or unmounted.
+      if (!isCurrentTriggeredRequest(generation)) return;
       if (tx) {
         selectedTriggeredTransaction.value = toTriggeredTransactionItem(
           hash,
@@ -170,35 +181,43 @@ function scheduleTriggeredTransactionPoll() {
         );
       }
     } catch (e) {
+      if (!isCurrentTriggeredRequest(generation)) return;
       // Keep the last snapshot and retry on the next tick.
       console.warn('Error refreshing triggered transaction', e);
     }
-    if (selectedTriggeredTransaction.value?.hash === hash) {
-      scheduleTriggeredTransactionPoll();
-    }
+    scheduleTriggeredTransactionPoll();
   }, TRIGGERED_TRANSACTION_POLL_INTERVAL_MS);
 }
 
 const closeTriggeredTransaction = () => {
+  triggeredRequestGeneration += 1;
   stopTriggeredTransactionPolling();
   selectedTriggeredTransaction.value = null;
 };
 
-onBeforeUnmount(stopTriggeredTransactionPolling);
+onBeforeUnmount(() => {
+  isTornDown = true;
+  triggeredRequestGeneration += 1;
+  stopTriggeredTransactionPolling();
+});
 
 const openTriggeredTransaction = async (hash: `0x${string}`) => {
   if (loadingTriggeredHash.value) return;
   loadingTriggeredHash.value = hash;
+  triggeredRequestGeneration += 1;
+  const generation = triggeredRequestGeneration;
   try {
     const tx: any = await transactionsStore.getTransaction(
       hash as TransactionHash,
     );
+    if (!isCurrentTriggeredRequest(generation)) return;
     if (!tx) {
       throw new Error(`Transaction ${hash} not found`);
     }
     selectedTriggeredTransaction.value = toTriggeredTransactionItem(hash, tx);
     scheduleTriggeredTransactionPoll();
   } catch (e: any) {
+    if (!isCurrentTriggeredRequest(generation)) return;
     notify({
       type: 'error',
       title: 'Error loading transaction',
