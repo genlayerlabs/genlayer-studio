@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useContractsStore, useTransactionsStore } from '@/stores';
+import {
+  useContractsStore,
+  useNetworkStore,
+  useTransactionsStore,
+} from '@/stores';
 import {
   useDb,
   useFileName,
@@ -44,6 +48,9 @@ describe('useContractsStore', () => {
   const mockDb = {
     deployedContracts: {
       clear: vi.fn(),
+      where: vi.fn().mockReturnThis(),
+      equals: vi.fn().mockReturnThis(),
+      delete: vi.fn(),
     },
     contractFiles: {
       clear: vi.fn(),
@@ -145,5 +152,43 @@ describe('useContractsStore', () => {
     expect(mockDb.transactions.clear).toHaveBeenCalled();
     expect(contractsStore.contracts).toHaveLength(0);
     expect(contractsStore.openedFiles).toHaveLength(0);
+  });
+});
+
+describe('useContractsStore.clearDeployedContractsForCurrentNetwork', () => {
+  const mockDb = {
+    deployedContracts: {
+      where: vi.fn().mockReturnThis(),
+      equals: vi.fn().mockReturnThis(),
+      delete: vi.fn(),
+    },
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    (useDb as Mock).mockReturnValue(mockDb);
+    (useFileName as Mock).mockReturnValue({ cleanupFileName: vi.fn() });
+    vi.clearAllMocks();
+  });
+
+  it('removes only the current network deployments and keeps contract files', async () => {
+    const contractsStore = useContractsStore();
+    const chainId = useNetworkStore().chainId;
+    contractsStore.contracts = [testContract];
+    contractsStore.setAllDeployedContracts([
+      { ...testDeployedContract, chainId },
+      { ...testDeployedContract, contractId: 'legacy' },
+      { ...testDeployedContract, contractId: 'other', chainId: chainId + 1 },
+    ]);
+
+    await contractsStore.clearDeployedContractsForCurrentNetwork();
+
+    expect(contractsStore.allDeployedContracts).toEqual([
+      expect.objectContaining({ contractId: 'other' }),
+    ]);
+    expect(contractsStore.contracts).toEqual([testContract]);
+    expect(mockDb.deployedContracts.where).toHaveBeenCalledWith('chainId');
+    expect(mockDb.deployedContracts.equals).toHaveBeenCalledWith(chainId);
+    expect(mockDb.deployedContracts.delete).toHaveBeenCalled();
   });
 });

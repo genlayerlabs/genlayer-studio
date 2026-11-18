@@ -127,6 +127,29 @@ describe('useTransactionsStore', () => {
     );
   });
 
+  it('clearTransactionsForCurrentNetwork drops only current-network txs', async () => {
+    const chainId = useNetworkStore().chainId;
+    const tx = (hash: string, txChainId?: number): TransactionItem => ({
+      ...testTransaction,
+      hash: hash as TransactionHash,
+      chainId: txChainId,
+    });
+    transactionsStore.setAllTransactions([
+      tx('0xcurrent', chainId),
+      tx('0xlegacy'),
+      tx('0xother', chainId + 1),
+    ]);
+
+    await transactionsStore.clearTransactionsForCurrentNetwork();
+
+    expect(transactionsStore.allTransactions.map((t) => t.hash)).toEqual([
+      '0xother',
+    ]);
+    expect(mockDb.transactions.where).toHaveBeenCalledWith('chainId');
+    expect(mockDb.transactions.equals).toHaveBeenCalledWith(chainId);
+    expect(mockDb.transactions.delete).toHaveBeenCalled();
+  });
+
   it('should update a transaction', () => {
     transactionsStore.addTransaction(testTransaction);
     transactionsStore.updateTransaction(updatedTransactionPayload);
