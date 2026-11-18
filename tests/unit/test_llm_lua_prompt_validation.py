@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 
-def test_exec_prompt_rejects_blank_prompt_before_provider(tmp_path):
+@pytest.fixture
+def lua_environment(tmp_path):
     lua = shutil.which("lua")
     if lua is None:
         pytest.skip("lua interpreter not available")
@@ -84,6 +85,11 @@ def test_exec_prompt_rejects_blank_prompt_before_provider(tmp_path):
         )
     )
 
+    return lua, tmp_path
+
+
+def test_exec_prompt_rejects_blank_prompt_before_provider(lua_environment):
+    lua, tmp_path = lua_environment
     test_script = tmp_path / "test_empty_prompt.lua"
     test_script.write_text(
         textwrap.dedent(
@@ -123,4 +129,65 @@ def test_exec_prompt_rejects_blank_prompt_before_provider(tmp_path):
         check=True,
         capture_output=True,
         text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "key,message,expected,provider_calls",
+    [
+        ("price (USD)", "Return the price (USD) today", "mocked", 0),
+        ("100%", "Return 100% of the result", "mocked", 0),
+        ("[result]", "Return [result] now", "mocked", 0),
+        ("value.json", "Return valueXjson", "provider", 1),
+        ("missing", "Unmatched prompt", "provider", 1),
+        ("", "Any prompt", "mocked", 0),
+        # Pattern matching backtracks explosively here; literal lookup is cheap.
+        ("a*a*a*a*a*a*a*a*b", "a" * 100, "provider", 1),
+    ],
+)
+def test_mock_keys_are_literal_substrings(
+    lua_environment, key, message, expected, provider_calls
+):
+    lua, tmp_path = lua_environment
+    test_script = tmp_path / "test_mock_matching.lua"
+    test_script.write_text(
+        textwrap.dedent(
+            f"""
+            package.path = [[{tmp_path}/?.lua;]] .. package.path
+            dofile([[{Path("backend/node/llm.lua").resolve()}]])
+            local llm = require("lib-llm")
+            local calls = 0
+            llm.rs.exec_prompt_in_provider = function()
+              calls = calls + 1
+              return {{ data = "provider" }}
+            end
+            local ctx = {{ host_data = {{
+              studio_llm_id = "provider-1",
+              mock_response = {{ response = {{ [ [=[{key}]=] ] = "mocked" }} }},
+            }} }}
+            local result = ExecPrompt(ctx, {{ prompt = [=[{message}]=] }}, 0)
+            assert(result.data == "{expected}", "unexpected response: " .. result.data)
+            assert(calls == {provider_calls}, "unexpected provider calls: " .. calls)
+            assert(result.consumed_gen == 0)
+
+            -- A specific literal match still takes priority over the default.
+            ctx.host_data.mock_response.response = {{
+              [""] = "default",
+              ["price (USD)"] = "specific",
+            }}
+            result = ExecPrompt(ctx, {{ prompt = "Return price (USD)" }}, 0)
+            assert(result.data == "specific")
+            result = ExecPrompt(ctx, {{ prompt = "Something else" }}, 0)
+            assert(result.data == "default")
+            assert(calls == {provider_calls})
+            """
+        )
+    )
+    subprocess.run(
+        [lua, str(test_script)],
+        cwd=Path(__file__).resolve().parents[2],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
