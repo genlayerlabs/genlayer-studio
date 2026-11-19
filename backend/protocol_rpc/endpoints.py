@@ -34,6 +34,7 @@ from backend.database_handler.contract_snapshot import (
 )
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
+from backend.rollup.web3_pool import Web3ConnectionPool
 from backend.database_handler.models import Base, TransactionStatus
 from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
@@ -572,6 +573,14 @@ def fund_account(
     accounts_manager.credit_tx_value_once(
         transaction_hash, account_address, normalized_amount
     )
+    # Mirror the database total while the credit holds the account row lock.
+    # An absent or offline legacy bridge does not prevent Studio funding.
+    hardhat = Web3ConnectionPool.get()
+    if hardhat is not None and hardhat.is_connected():
+        balance = accounts_manager.get_account_balance(account_address)
+        hardhat.manager.request_blocking(
+            "hardhat_setBalance", [account_address, hex(int(balance))]
+        )
     # Publish the tx already credited, or a worker can claim it and credit it again.
     session.commit()
     return transaction_hash
