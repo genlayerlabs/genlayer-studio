@@ -49,7 +49,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     }
   }
 
-  async function fundAccount(account: AccountInfo, amount: bigint) {
+  async function fundAccount(account: AccountInfo, amountWei: string) {
     const { address } = account;
     if (
       !networkStore.isStudio ||
@@ -60,7 +60,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     const network = networkStore.currentNetwork;
     funding.value[address] = true;
     try {
-      await rpcClient.fundAccount(address, amount.toString());
+      await rpcClient.fundAccount(address, amountWei);
       if (network === networkStore.currentNetwork)
         await refreshBalance(address);
     } finally {

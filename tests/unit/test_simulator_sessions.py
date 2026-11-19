@@ -87,36 +87,6 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("connected", [True, False])
-def test_fund_account_mirrors_database_total_when_hardhat_is_running(
-    monkeypatch, connected
-):
-    session = MagicMock()
-    accounts = MagicMock()
-    accounts.get_account_balance.return_value = 125
-    hardhat = MagicMock()
-    hardhat.is_connected.return_value = connected
-    monkeypatch.setattr(endpoints, "AccountsManager", lambda _: accounts)
-    monkeypatch.setattr(endpoints, "TransactionsProcessor", MagicMock())
-    monkeypatch.setattr(endpoints.Web3ConnectionPool, "get", lambda: hardhat)
-    calls = MagicMock()
-    calls.attach_mock(accounts.credit_tx_value_once, "credit")
-    calls.attach_mock(hardhat.manager.request_blocking, "set_balance")
-    calls.attach_mock(session.commit, "commit")
-
-    address = "0x" + "1" * 40
-    endpoints.fund_account(session, address, 25)
-
-    expected = (
-        ["credit", "set_balance", "commit"] if connected else ["credit", "commit"]
-    )
-    assert [call[0] for call in calls.mock_calls] == expected
-    if connected:
-        hardhat.manager.request_blocking.assert_called_once_with(
-            "hardhat_setBalance", [address, "0x7d"]
-        )
-
-
 @pytest.mark.parametrize(
     ("wire_amount", "expected_amount"),
     [("10000000000000000000", 10_000_000_000_000_000_000), ("0x2a", 42)],

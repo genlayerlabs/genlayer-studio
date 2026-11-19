@@ -25,7 +25,7 @@ async function fund(value: string) {
 
   error.value = '';
   try {
-    await store.fundAccount(props.account, wei);
+    await store.fundAccount(props.account, wei.toString());
     notify({ title: `Funded ${value.trim()} GEN`, type: 'success' });
     amount.value = '';
     shown.value = false;
@@ -60,7 +60,11 @@ function refresh() {
       >
         <div class="text-xs text-gray-500 dark:text-gray-400">
           Current:
-          {{ balance === undefined ? '—' : formatGenBalance(balance) + ' GEN' }}
+          {{
+            balance === undefined
+              ? 'unknown'
+              : formatGenBalance(balance) + ' GEN'
+          }}
         </div>
         <div class="flex gap-1">
           <Btn
