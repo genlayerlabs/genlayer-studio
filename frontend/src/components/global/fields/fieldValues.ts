@@ -42,3 +42,38 @@ export function getDefaultValueForType(
       return new AnyFieldValue('');
   }
 }
+
+export function getComponentProps(type: ContractParamsSchema) {
+  return getUnionTypes(type).length ? { schema: type } : {};
+}
+
+export function getTypeLabel(type: ContractParamsSchema): string {
+  if (typeof type === 'string') return type === 'null' ? 'None' : type;
+  const union = getUnionTypes(type);
+  if (union.length) return union.map(getTypeLabel).join(' | ');
+  if (Array.isArray(type)) {
+    const element = type[0];
+    if (
+      type.length === 1 &&
+      typeof element === 'object' &&
+      !Array.isArray(element) &&
+      '$rep' in element
+    ) {
+      return typeof element.$rep === 'string'
+        ? `list[${getTypeLabel(element.$rep)}]`
+        : 'list';
+    }
+    return 'list';
+  }
+  if ('$rep' in type) {
+    return typeof type.$rep === 'string'
+      ? `list[${getTypeLabel(type.$rep)}]`
+      : 'list';
+  }
+  if ('$dict' in type) {
+    return typeof type.$dict === 'string'
+      ? `dict[${getTypeLabel(type.$dict)}]`
+      : 'dict';
+  }
+  return 'struct';
+}

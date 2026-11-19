@@ -6,6 +6,8 @@ import { useUniqueId } from '@/hooks/useUniqueId';
 import SelectInput from '../inputs/SelectInput.vue';
 import FieldLabel from './FieldLabel.vue';
 import {
+  getComponentProps,
+  getTypeLabel,
   getDefaultUnionIndex,
   getDefaultValueForType,
   getUnionTypes,
@@ -25,12 +27,7 @@ const selectedType = computed(() => types.value[Number(selected.value)]!);
 const options = computed(() =>
   types.value.map((type, index) => ({
     value: String(index),
-    label:
-      type === 'null'
-        ? 'None'
-        : typeof type === 'string'
-          ? type
-          : JSON.stringify(type),
+    label: getTypeLabel(type),
   })),
 );
 
@@ -55,14 +52,10 @@ watch(selected, () => {
       v-if="selectedType !== 'null'"
       :key="selected"
       v-model="model"
-      v-bind="inputMap.getComponentProps(selectedType)"
+      v-bind="getComponentProps(selectedType)"
       :name="name"
       :label="label"
-      :placeholder="
-        typeof selectedType === 'string'
-          ? selectedType
-          : JSON.stringify(selectedType)
-      "
+      :placeholder="getTypeLabel(selectedType)"
     />
   </div>
 </template>

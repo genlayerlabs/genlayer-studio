@@ -115,4 +115,47 @@ describe('union contract parameters', () => {
     expect(value()).toBeNull();
     expect(wrapper.findAll('select')[1]!.element.value).toBe('1');
   });
+  it.each([false, true])(
+    'resets selectors when a new method reuses its schema (keyword=%s)',
+    async (keyword) => {
+      const schema: ContractParamsSchema = { $or: ['string', 'null'] };
+      const { wrapper, value } = await setup(schema, keyword);
+      await wrapper.get('select').setValue('0');
+      await wrapper.get('input').setValue('hello');
+      await wrapper.setProps({
+        methodBase: {
+          params: keyword
+            ? [['b', 'string']]
+            : [
+                ['a', schema],
+                ['b', 'string'],
+              ],
+          kwparams: keyword ? { a: schema } : {},
+        },
+      });
+      await flushPromises();
+      expect(value()).toBeNull();
+      expect(wrapper.get('select').element.value).toBe('1');
+      expect(wrapper.find('input[name="a"]').exists()).toBe(false);
+    },
+  );
+
+  it.each([
+    [[{ $rep: 'int' }], 'list[int]'],
+    [[{ $rep: { $dict: 'int' } }], 'list'],
+    [{ $dict: 'string' }, 'dict[string]'],
+    [{ $dict: { name: 'string' } }, 'dict'],
+    [{ name: 'string' }, 'struct'],
+  ] satisfies [ContractParamsSchema, string][])(
+    'labels complex alternatives readably (%j)',
+    async (schema, label) => {
+      const { wrapper } = await setup({ $or: [schema, 'null'] });
+      expect(wrapper.findAll('option').map((option) => option.text())).toEqual([
+        label,
+        'None',
+      ]);
+      await wrapper.get('select').setValue('0');
+      expect(wrapper.get('input').attributes('placeholder')).toBe(label);
+    },
+  );
 });
