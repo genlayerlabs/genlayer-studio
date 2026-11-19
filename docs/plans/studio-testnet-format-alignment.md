@@ -61,6 +61,15 @@ Studio needs to be updated so its transaction response format matches the testne
 | random seed | not returned | `randomSeed` (bytes32) | Missing in studio |
 | tx slot | not returned | `txSlot` (uint256) | Missing in studio |
 
+## Studio leader receipts
+
+`eth_getTransactionByHash` and each entry in `sim_getTransactionsForAddress` expose
+the leader's execution receipt at `consensus_data.leader_receipt[0]`. When the
+leader also runs validation, its second receipt is returned as
+`studio_data.leader_validation_receipt`. The `studio_data` field is omitted
+when there is no self-validation receipt. Older object-shaped execution receipts
+retain their shape.
+
 ## Messages Struct
 
 | Field | Studio | Testnet Bradbury |

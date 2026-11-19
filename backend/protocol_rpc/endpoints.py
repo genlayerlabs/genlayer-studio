@@ -1931,6 +1931,23 @@ def get_transaction_count(
     return hex(transactions_processor.get_transaction_count(address))
 
 
+def _format_transaction_receipts(transaction: dict) -> dict:
+    consensus_data = transaction.get("consensus_data")
+    if not isinstance(consensus_data, dict):
+        return transaction
+
+    leader_receipts = consensus_data.get("leader_receipt")
+    if not isinstance(leader_receipts, list) or len(leader_receipts) != 2:
+        return transaction
+
+    # A two-entry Studio receipt holds the leader execution and self-validation.
+    return {
+        **transaction,
+        "consensus_data": {**consensus_data, "leader_receipt": leader_receipts[:1]},
+        "studio_data": {"leader_validation_receipt": leader_receipts[1]},
+    }
+
+
 def get_transaction_by_hash(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -1970,20 +1987,7 @@ def get_transaction_by_hash(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    consensus_data = transaction.get("consensus_data")
-    if isinstance(consensus_data, dict):
-        leader_receipts = consensus_data.get("leader_receipt")
-        if isinstance(leader_receipts, list) and len(leader_receipts) == 2:
-            # Studio runs the leader twice: once to execute and once to validate.
-            transaction = {
-                **transaction,
-                "consensus_data": {
-                    **consensus_data,
-                    "leader_receipt": leader_receipts[:1],
-                },
-                "studio_data": {"leader_validation_receipt": leader_receipts[1]},
-            }
-    return _sanitize_rpc_private_keys(transaction)
+    return _sanitize_rpc_private_keys(_format_transaction_receipts(transaction))
 
 
 def get_studio_transaction_by_hash(
@@ -3512,10 +3516,11 @@ def get_transactions_for_address(
     if not accounts_manager.is_valid_address(address):
         raise InvalidAddressError(address)
 
+    transactions = transactions_processor.get_transactions_for_address(
+        address, TransactionAddressFilter(filter)
+    )
     return _sanitize_rpc_private_keys(
-        transactions_processor.get_transactions_for_address(
-            address, TransactionAddressFilter(filter)
-        )
+        [_format_transaction_receipts(transaction) for transaction in transactions]
     )
 
 
