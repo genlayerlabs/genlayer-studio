@@ -752,73 +752,65 @@ const handleCancelTransaction = async () => {
   }
 };
 
-function prettifyTxData(x: any): any {
-  const oldResult = x?.consensus_data?.leader_receipt?.[0]?.result;
-
-  if (oldResult) {
-    try {
-      x.consensus_data.leader_receipt[0].result =
-        resultToUserFriendlyJson(oldResult);
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldCalldata = x?.consensus_data?.leader_receipt?.[0]?.calldata;
-
-  if (oldCalldata) {
-    try {
-      x.consensus_data.leader_receipt[0].calldata = {
-        base64: oldCalldata,
-        ...calldataToUserFriendlyJson(b64ToArray(oldCalldata)),
-      };
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldDataCalldata = x?.data?.calldata;
-
-  if (oldDataCalldata) {
-    try {
-      x.data.calldata = {
-        base64: oldDataCalldata,
-        ...calldataToUserFriendlyJson(b64ToArray(oldDataCalldata)),
-      };
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldEqOutputs = x?.consensus_data?.leader_receipt?.[0]?.eq_outputs;
-  if (oldEqOutputs == undefined) {
-    return x;
-  }
+function prettifyReceipt(receipt: Record<string, any>) {
+  const formatted = { ...receipt };
   try {
-    const newEqOutputs = Object.fromEntries(
-      Object.entries(oldEqOutputs).map(([k, v]) => {
-        const val = resultToUserFriendlyJson(v);
-        return [k, val];
-      }),
-    );
-    const ret = {
-      ...x,
-      consensus_data: {
-        ...x.consensus_data,
-        leader_receipt: [
-          {
-            ...x.consensus_data.leader_receipt[0],
-            eq_outputs: newEqOutputs,
-          },
-          ...x.consensus_data.leader_receipt.slice(1),
-        ],
-      },
-    };
-    return ret;
-  } catch (e) {
-    console.log(e);
-    return x;
+    if (typeof receipt.result === 'string') {
+      formatted.result = resultToUserFriendlyJson(receipt.result);
+    }
+    if (typeof receipt.calldata === 'string' && receipt.calldata) {
+      formatted.calldata = {
+        base64: receipt.calldata,
+        ...calldataToUserFriendlyJson(b64ToArray(receipt.calldata)),
+      };
+    }
+    if (receipt.eq_outputs) {
+      formatted.eq_outputs = Object.fromEntries(
+        Object.entries(receipt.eq_outputs).map(([key, value]) => [
+          key,
+          typeof value === 'string' ? resultToUserFriendlyJson(value) : value,
+        ]),
+      );
+    }
+  } catch (error) {
+    console.log(error);
   }
+  return formatted;
+}
+
+function prettifyTxData(x: any): any {
+  const formatted = { ...x };
+  if (x.consensus_data?.leader_receipt?.[0]) {
+    const [executionReceipt, ...otherReceipts] =
+      x.consensus_data.leader_receipt;
+    formatted.consensus_data = {
+      ...x.consensus_data,
+      leader_receipt: [prettifyReceipt(executionReceipt), ...otherReceipts],
+    };
+  }
+  if (x.studio_data?.leader_validation_receipt) {
+    formatted.studio_data = {
+      ...x.studio_data,
+      leader_validation_receipt: prettifyReceipt(
+        x.studio_data.leader_validation_receipt,
+      ),
+    };
+  }
+  const calldata = x.data?.calldata;
+  if (typeof calldata === 'string' && calldata) {
+    try {
+      formatted.data = {
+        ...x.data,
+        calldata: {
+          base64: calldata,
+          ...calldataToUserFriendlyJson(b64ToArray(calldata)),
+        },
+      };
+    } catch (error) {
+      console.log(error);
+    }
+  }
+  return formatted;
 }
 
 const leaderErrorDetail = computed(() => {

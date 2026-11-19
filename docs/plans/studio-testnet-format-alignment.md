@@ -70,6 +70,23 @@ leader also runs validation, its second receipt is returned as
 when there is no self-validation receipt. Older object-shaped execution receipts
 retain their shape.
 
+This is a breaking change for Studio v0.124. Readers of either RPC must migrate
+from `consensus_data.leader_receipt[1]` to
+`studio_data.leader_validation_receipt`. The first entry is still the execution
+receipt.
+
+The following surfaces retain the two-entry Studio representation for existing
+consumers.
+
+- `gen_getStudioTransactionByHash` preserves the dedicated Studio diagnostics
+  response.
+- `eth_getBlockByNumber` and `eth_getBlockByHash` preserve the existing full
+  transaction objects embedded in blocks.
+- The appeal submission response preserves the updated transaction payload
+  returned by that mutation.
+- The Studio Explorer query reads the persisted consensus data directly for its
+  diagnostics and history views.
+
 ## Messages Struct
 
 | Field | Studio | Testnet Bradbury |

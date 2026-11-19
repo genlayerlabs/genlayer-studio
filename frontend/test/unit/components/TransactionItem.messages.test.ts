@@ -35,12 +35,6 @@ vi.mock('@/utils/explorerUrl', () => ({
   getExplorerUrl: vi.fn(() => 'http://explorer.local'),
 }));
 
-vi.mock('@/calldata/jsonifier', () => ({
-  resultToUserFriendlyJson: vi.fn((value) => value),
-  b64ToArray: vi.fn(() => []),
-  calldataToUserFriendlyJson: vi.fn(() => ({})),
-}));
-
 const parentHash = `0x${'a'.repeat(64)}` as const;
 const childHash = `0x${'b'.repeat(64)}` as const;
 const grandchildHash = `0x${'c'.repeat(64)}` as const;
@@ -102,7 +96,12 @@ describe('TransactionItem messages (triggered transactions)', () => {
   });
 
   it('shows the SDK response with one leader receipt and Studio validation data', async () => {
-    const validationReceipt = { vote: 'agree' };
+    const validationReceipt = {
+      vote: 'agree',
+      result: 'AXg=',
+      calldata: 'AA==',
+      eq_outputs: { validator: 'AXg=' },
+    };
     vi.stubGlobal('fetch', async (_url: string, options: { body: string }) => {
       const { id, method } = JSON.parse(options.body);
       expect(method).toBe('eth_getTransactionByHash');
@@ -114,7 +113,7 @@ describe('TransactionItem messages (triggered transactions)', () => {
           status: 'FINALIZED',
           data: {},
           consensus_data: {
-            leader_receipt: [{ eq_outputs: { leader: {} } }],
+            leader_receipt: [{ execution_result: 'SUCCESS' }],
           },
           studio_data: { leader_validation_receipt: validationReceipt },
         },
@@ -133,9 +132,15 @@ describe('TransactionItem messages (triggered transactions)', () => {
         .findComponent({ name: 'JsonViewer' })
         .props('value');
       expect(rendered.consensus_data.leader_receipt).toHaveLength(1);
-      expect(rendered.studio_data.leader_validation_receipt).toEqual(
-        validationReceipt,
-      );
+      expect(rendered.studio_data.leader_validation_receipt).toMatchObject({
+        vote: 'agree',
+        result: { raw: 'AXg=', status: 'rollback', payload: 'x' },
+        calldata: { base64: 'AA==' },
+        eq_outputs: { validator: { status: 'rollback', payload: 'x' } },
+      });
+      expect((data as { studio_data?: unknown }).studio_data).toEqual({
+        leader_validation_receipt: validationReceipt,
+      });
       wrapper.unmount();
     } finally {
       vi.unstubAllGlobals();
