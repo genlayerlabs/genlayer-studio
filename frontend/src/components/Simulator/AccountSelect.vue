@@ -39,6 +39,12 @@ const refreshAccounts = () => {
   for (const { address } of store.accounts) void store.refreshBalance(address);
 };
 
+const closeAccountDropdown = (event: Event) =>
+  !(
+    event.target instanceof Element &&
+    event.target.closest('[data-account-funding]')
+  );
+
 const openTestnetFaucet = () => {
   window.open(PUBLIC_TESTNET_FAUCET_URL, '_blank', 'noopener,noreferrer');
 };
@@ -79,7 +85,11 @@ const disconnectWallet = async () => {
 
 <template>
   <div class="flex flex-row items-center gap-1">
-    <Dropdown placement="bottom-end" @show="refreshAccounts">
+    <Dropdown
+      placement="bottom-end"
+      :auto-hide="closeAccountDropdown"
+      @show="refreshAccounts"
+    >
       <GhostBtn v-tooltip="'Switch account'">
         <Wallet class="h-5 w-5" />
         {{ store.displayAddress }}

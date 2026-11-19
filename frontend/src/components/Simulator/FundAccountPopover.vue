@@ -53,7 +53,11 @@ function refresh() {
     </button>
 
     <template #popper>
-      <form class="flex w-64 flex-col gap-2 p-3" @submit.prevent="fund(amount)">
+      <form
+        data-account-funding
+        class="flex w-64 flex-col gap-2 p-3"
+        @submit.prevent="fund(amount)"
+      >
         <div class="text-xs text-gray-500 dark:text-gray-400">
           Current:
           {{ balance === undefined ? '—' : formatGenBalance(balance) + ' GEN' }}
