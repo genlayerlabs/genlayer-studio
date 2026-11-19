@@ -662,21 +662,11 @@ async def check_provider_is_available(
 
 async def get_providers_and_models(
     llm_provider_registry: LLMProviderRegistry,
-    genvm_manager: GenVMManager,
 ) -> list[dict]:
-    providers = await llm_provider_registry.get_all_dict()
-    sem = asyncio.Semaphore(8)
-
-    async def check_with_semaphore(genvm_manager, provider):
-        async with sem:
-            return await check_provider_is_available(genvm_manager, provider)
-
-    availability = await asyncio.gather(
-        *(check_with_semaphore(genvm_manager, p) for p in providers)
-    )
-    for provider, is_available in zip(providers, availability):
-        provider["is_model_available"] = is_available
-    return providers
+    # Listing providers must stay fast, so it makes no LLM calls. Availability
+    # is checked when a validator is created or updated, and by random
+    # validator creation.
+    return await llm_provider_registry.get_all_dict()
 
 
 @check_forbidden_method_in_hosted_studio
@@ -725,6 +715,7 @@ def delete_provider(session: Session, id: int) -> None:
 async def create_validator(
     session: Session,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     stake: int,
     provider: str,
     model: str,
@@ -749,9 +740,17 @@ async def create_validator(
 
     accounts_manager = AccountsManager(session)
 
+    # Probe before persisting so no DB transaction stays open during the LLM
+    # call. A failed probe does not block creation (validators with a broken
+    # provider are used to exercise LLM error paths); the caller is told so it
+    # can warn the user.
+    llm_provider_available = await check_provider_is_available(
+        genvm_manager, llm_provider
+    )
+
     account = accounts_manager.create_new_account()
 
-    return await validators_manager.registry.create_validator(
+    validator = await validators_manager.registry.create_validator(
         Validator(
             address=account.address,
             private_key=account.key,
@@ -759,6 +758,8 @@ async def create_validator(
             llmprovider=llm_provider,
         )
     )
+    validator["llm_provider_available"] = llm_provider_available
+    return validator
 
 
 @check_forbidden_method_in_hosted_studio
@@ -873,6 +874,7 @@ async def create_random_validators(
 async def update_validator(
     session: Session,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     validator_address: str,
     stake: int,
     provider: str,
@@ -907,7 +909,13 @@ async def update_validator(
         stake=stake,
         llmprovider=llm_provider,
     )
-    return await validators_manager.registry.update_validator(validator)
+    # Same non-blocking probe as create_validator, run before touching the DB.
+    llm_provider_available = await check_provider_is_available(
+        genvm_manager, llm_provider
+    )
+    updated = await validators_manager.registry.update_validator(validator)
+    updated["llm_provider_available"] = llm_provider_available
+    return updated
 
 
 @check_forbidden_method_in_hosted_studio

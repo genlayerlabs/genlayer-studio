@@ -17,6 +17,21 @@ from backend.protocol_rpc.types import (
     DecodedTopUpFeesDataArgs,
 )
 
+TEST_PLUGIN_CONFIG = {
+    "api_key_env_var": "TEST_KEY",
+    "api_url": "https://example.test/api",
+}
+
+
+class AvailableGenVMManager:
+    """Stub whose LLM availability probe always answers 'ok'."""
+
+    def __init__(self):
+        self.logger = MagicMock()
+
+    async def try_llms(self, providers, prompt):
+        return [{"response": "ok"}]
+
 
 def test_top_level_deploy_uses_transactional_virtual_ghost_factory():
     processor = MagicMock()
@@ -325,19 +340,20 @@ async def test_create_validator_uses_request_scoped_session(monkeypatch):
             model=model,
             config={},
             plugin="plugin",
-            plugin_config={},
+            plugin_config=TEST_PLUGIN_CONFIG,
         ),
     )
 
     result = await endpoints.create_validator(
         session,
         validators_manager,
+        AvailableGenVMManager(),
         stake=10,
         provider="prov",
         model="model",
     )
 
-    assert result == {"address": "0xabc"}
+    assert result == {"address": "0xabc", "llm_provider_available": True}
     accounts_manager_instance.create_new_account.assert_called_once()
     registry_instance.create_validator.assert_awaited_once()
     validator_arg = registry_instance.create_validator.await_args.args[0]
@@ -491,20 +507,21 @@ async def test_update_validator_uses_request_session(monkeypatch):
             model=model,
             config={},
             plugin="plugin",
-            plugin_config={},
+            plugin_config=TEST_PLUGIN_CONFIG,
         ),
     )
 
     result = await endpoints.update_validator(
         session,
         validators_manager,
+        AvailableGenVMManager(),
         validator_address="0xabc",
         stake=42,
         provider="prov",
         model="model",
     )
 
-    assert result == {"address": "0xabc"}
+    assert result == {"address": "0xabc", "llm_provider_available": True}
     registry_instance.update_validator.assert_awaited_once()
     validator_arg = registry_instance.update_validator.await_args.args[0]
     assert validator_arg.address == "0xabc"

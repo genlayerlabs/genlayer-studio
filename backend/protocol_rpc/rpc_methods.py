@@ -58,12 +58,10 @@ def fund_account(
 
 @rpc.method("sim_getProvidersAndModels")
 async def get_providers_and_models(
-    genvm_manager=Depends(get_genvm_manager),
     llm_provider_registry=Depends(get_llm_provider_registry),
 ) -> list[dict]:
     return await impl.get_providers_and_models(
         llm_provider_registry=llm_provider_registry,
-        genvm_manager=genvm_manager,
     )
 
 
@@ -111,10 +109,12 @@ async def create_validator(
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.create_validator(
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         stake=stake,
         provider=provider,
         model=model,
@@ -186,10 +186,12 @@ async def update_validator(
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.update_validator(
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         validator_address=validator_address,
         stake=stake,
         provider=provider,

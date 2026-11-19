@@ -1,35 +1,39 @@
 import asyncio
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from backend.domain.types import LLMProvider
 from backend.protocol_rpc import endpoints
 
 
 class FakeLLMProviderRegistry:
+    PROVIDERS = [
+        {
+            "provider": "bad-provider",
+            "model": "bad-model",
+            "config": {},
+            "plugin": "openai-compatible",
+            "plugin_config": {
+                "api_key_env_var": "BAD_KEY",
+                "api_url": "https://example.invalid/api",
+            },
+        },
+        {
+            "provider": "good-provider",
+            "model": "good-model",
+            "config": {},
+            "plugin": "openai-compatible",
+            "plugin_config": {
+                "api_key_env_var": "GOOD_KEY",
+                "api_url": "https://example.test/api",
+            },
+        },
+    ]
+
     async def get_all_dict(self):
-        return [
-            {
-                "provider": "bad-provider",
-                "model": "bad-model",
-                "config": {},
-                "plugin": "openai-compatible",
-                "plugin_config": {
-                    "api_key_env_var": "BAD_KEY",
-                    "api_url": "https://example.invalid/api",
-                },
-            },
-            {
-                "provider": "good-provider",
-                "model": "good-model",
-                "config": {},
-                "plugin": "openai-compatible",
-                "plugin_config": {
-                    "api_key_env_var": "GOOD_KEY",
-                    "api_url": "https://example.test/api",
-                },
-            },
-        ]
+        return [dict(p) for p in self.PROVIDERS]
 
 
 class FakeGenVMManager:
@@ -62,14 +66,94 @@ class CapturingGenVMManager:
 
 
 @pytest.mark.asyncio
-async def test_get_providers_and_models_marks_failed_checks_unavailable():
-    providers = await endpoints.get_providers_and_models(
-        FakeLLMProviderRegistry(),
+async def test_get_providers_and_models_does_not_probe_llms(monkeypatch):
+    async def fail_probe(*_args, **_kwargs):
+        raise AssertionError("listing providers must not call LLMs")
+
+    monkeypatch.setattr(endpoints, "check_provider_is_available", fail_probe)
+
+    providers = await endpoints.get_providers_and_models(FakeLLMProviderRegistry())
+
+    assert [p["model"] for p in providers] == ["bad-model", "good-model"]
+
+
+def _validator_test_setup(monkeypatch, provider_dict):
+    session = object()
+    account = SimpleNamespace(address="0xabc", key="priv")
+    accounts_manager = MagicMock()
+    accounts_manager.create_new_account.return_value = account
+    registry = SimpleNamespace(
+        create_validator=AsyncMock(return_value={"address": account.address}),
+        update_validator=AsyncMock(return_value={"address": account.address}),
+    )
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints,
+        "get_default_provider_for",
+        lambda provider, model: LLMProvider(
+            provider=provider,
+            model=model,
+            config=provider_dict["config"],
+            plugin=provider_dict["plugin"],
+            plugin_config=provider_dict["plugin_config"],
+        ),
+    )
+    return session, SimpleNamespace(registry=registry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_dict, expected",
+    [
+        (FakeLLMProviderRegistry.PROVIDERS[0], False),
+        (FakeLLMProviderRegistry.PROVIDERS[1], True),
+    ],
+)
+async def test_create_validator_probes_provider_without_blocking(
+    monkeypatch, provider_dict, expected
+):
+    session, validators_manager = _validator_test_setup(monkeypatch, provider_dict)
+
+    result = await endpoints.create_validator(
+        session,
+        validators_manager,
         FakeGenVMManager(),
+        stake=1,
+        provider=provider_dict["provider"],
+        model=provider_dict["model"],
     )
 
-    assert providers[0]["is_model_available"] is False
-    assert providers[1]["is_model_available"] is True
+    # The validator is saved even when its provider fails the probe.
+    validators_manager.registry.create_validator.assert_awaited_once()
+    assert result == {"address": "0xabc", "llm_provider_available": expected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_dict, expected",
+    [
+        (FakeLLMProviderRegistry.PROVIDERS[0], False),
+        (FakeLLMProviderRegistry.PROVIDERS[1], True),
+    ],
+)
+async def test_update_validator_probes_provider_without_blocking(
+    monkeypatch, provider_dict, expected
+):
+    session, validators_manager = _validator_test_setup(monkeypatch, provider_dict)
+
+    result = await endpoints.update_validator(
+        session,
+        validators_manager,
+        FakeGenVMManager(),
+        validator_address="0xabc",
+        stake=1,
+        provider=provider_dict["provider"],
+        model=provider_dict["model"],
+    )
+
+    validators_manager.registry.update_validator.assert_awaited_once()
+    assert result == {"address": "0xabc", "llm_provider_available": expected}
 
 
 @pytest.mark.asyncio
