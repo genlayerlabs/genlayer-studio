@@ -2677,6 +2677,60 @@ class PendingState(TransactionState):
             )
             return None
 
+        # An empty Studio validator set is a configuration error. Cancel new
+        # contract transactions before activation; preserve agreed decisions
+        # and their existing recovery path when re-entering for an appeal.
+        is_initial_activation = not (
+            bool(context.transaction.consensus_data)
+            or bool(context.transaction.consensus_history)
+            or bool(context.transaction.appealed)
+            or bool(context.transaction.appeal_undetermined)
+            or bool(context.transaction.appeal_leader_timeout)
+            or bool(context.transaction.appeal_validators_timeout)
+        )
+        if (
+            is_initial_activation
+            and context.transaction.type != TransactionType.SEND
+            and (
+                context.validators_snapshot is None
+                or not context.validators_snapshot.nodes
+            )
+        ):
+            tx_hash = context.transaction.hash
+            value_sender = context.transaction.from_address
+            if value_sender:
+                context.accounts_manager.refund_tx_value(tx_hash, value_sender)
+            fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+            fee_sender = (
+                fee_accounting.get("sender")
+                if isinstance(fee_accounting, dict)
+                else None
+            ) or value_sender
+            if fee_sender:
+                context.accounts_manager.cancel_tx_fee_accounting_once(
+                    tx_hash, fee_sender, "no_validators_available"
+                )
+            context.transactions_processor.set_transaction_result(
+                tx_hash, {"error": "no_validators_available"}
+            )
+            context.msg_handler.send_message(
+                LogEvent(
+                    "consensus_event",
+                    EventType.ERROR,
+                    EventScope.CONSENSUS,
+                    "No validators found to process transaction",
+                    {"transaction_hash": tx_hash},
+                    transaction_hash=tx_hash,
+                )
+            )
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                context.transactions_processor,
+                tx_hash,
+                TransactionStatus.CANCELED,
+                context.msg_handler,
+            )
+            return None
+
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
             tx_hash=context.transaction.hash,
@@ -2800,14 +2854,6 @@ class PendingState(TransactionState):
                 fee_accounting,
             )
 
-        is_initial_activation = not (
-            bool(context.transaction.consensus_data)
-            or bool(context.transaction.consensus_history)
-            or bool(context.transaction.appealed)
-            or bool(context.transaction.appeal_undetermined)
-            or bool(context.transaction.appeal_leader_timeout)
-            or bool(context.transaction.appeal_validators_timeout)
-        )
         requested_initial_validators = int(
             context.transaction.num_of_initial_validators or DEFAULT_VALIDATORS_COUNT
         )

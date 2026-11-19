@@ -484,3 +484,67 @@ class TestMintOnDemand:
 
         am.credit_account_balance.assert_called_once_with("0xsender", 70)
         am.debit_account_balance.assert_called_once_with("0xsender", 100)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_snapshot", [False, True])
+@pytest.mark.parametrize(
+    "tx_type", [TransactionType.RUN_CONTRACT, TransactionType.DEPLOY_CONTRACT]
+)
+async def test_empty_validator_set_cancels_before_activation(missing_snapshot, tx_type):
+    context = _pending_context_with_validator_capacity(requested=5, available=0)
+    tx = context.transactions_processor.get_transaction_by_hash.return_value
+    tx["type"] = tx_type.value
+    tx["value"] = 17
+    fee_sender = "0x3333333333333333333333333333333333333333"
+    tx["data"][FEE_ACCOUNTING_KEY] = {"sender": fee_sender}
+    if missing_snapshot:
+        context.validators_snapshot = None
+
+    assert await PendingState().handle(context) is None
+
+    context.transactions_processor.update_transaction_status.assert_called_once_with(
+        tx["hash"], TransactionStatus.CANCELED, True
+    )
+    context.transactions_processor.set_transaction_result.assert_called_once_with(
+        tx["hash"], {"error": "no_validators_available"}
+    )
+    context.accounts_manager.refund_tx_value.assert_called_once_with(
+        tx["hash"], tx["from_address"]
+    )
+    context.accounts_manager.cancel_tx_fee_accounting_once.assert_called_once_with(
+        tx["hash"], fee_sender, "no_validators_available"
+    )
+    context.accounts_manager.credit_tx_value_once.assert_not_called()
+    context.transactions_processor.mutate_transaction_fee_accounting.assert_not_called()
+    assert any(
+        call.args[0].message == "No validators found to process transaction"
+        for call in context.msg_handler.send_message.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_validator_set_preserves_appeal_recovery():
+    context = _pending_context_with_validator_capacity(requested=5, available=0)
+    tx = context.transactions_processor.get_transaction_by_hash.return_value
+    tx["appealed"] = True
+
+    with pytest.raises(consensus_base.NoValidatorsAvailableError):
+        await PendingState().handle(context)
+
+    context.accounts_manager.refund_tx_value.assert_not_called()
+    context.accounts_manager.cancel_tx_fee_accounting_once.assert_not_called()
+    context.transactions_processor.update_transaction_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_empty_validator_set_allows_native_transfer(monkeypatch):
+    context = _pending_context_with_validator_capacity(requested=5, available=0)
+    tx = context.transactions_processor.get_transaction_by_hash.return_value
+    tx["type"] = TransactionType.SEND.value
+    transfer = AsyncMock()
+    monkeypatch.setattr(consensus_base.ConsensusAlgorithm, "execute_transfer", transfer)
+
+    assert await PendingState().handle(context) is None
+    transfer.assert_awaited_once()
+    context.accounts_manager.cancel_tx_fee_accounting_once.assert_not_called()
