@@ -2836,6 +2836,7 @@ def _transaction_appeal_updated_event(tx_id: str) -> LogEvent:
         EventScope.CONSENSUS,
         "Set transaction appealed",
         {"hash": tx_id},
+        transaction_hash=tx_id,
     )
 
 

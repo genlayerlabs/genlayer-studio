@@ -2439,6 +2439,7 @@ class ConsensusWorker:
             ):
                 # Convert to Transaction domain object
                 transaction = Transaction.from_dict(appeal_data)
+                is_leader_appeal = transaction.status == TransactionStatus.UNDETERMINED
 
                 logger.info(
                     f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
@@ -2458,7 +2459,7 @@ class ConsensusWorker:
                 accounts_manager = accounts_manager_factory(session)
 
                 async with self.validators_manager.snapshot() as validators_snapshot:
-                    if transaction.status == TransactionStatus.UNDETERMINED:
+                    if is_leader_appeal:
                         # Leader appeal
                         await self.consensus_algorithm.process_leader_appeal(
                             transaction,
@@ -2505,6 +2506,19 @@ class ConsensusWorker:
                     transaction.hash, include_pending=False
                 )
                 session.commit()
+                if is_leader_appeal:
+                    # The frontend fetches the receipt when this event arrives.
+                    self.msg_handler.send_message(
+                        LogEvent(
+                            "transaction_appeal_updated",
+                            EventType.INFO,
+                            EventScope.CONSENSUS,
+                            "Leader appeal processing finished",
+                            {"hash": tx_hash},
+                            transaction_hash=tx_hash,
+                        ),
+                        log_to_terminal=False,
+                    )
                 self._generic_error_retries.pop(transaction.hash, None)
                 self._leader_crash_retries.pop(transaction.hash, None)
                 logger.info(

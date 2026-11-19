@@ -29,6 +29,7 @@ export const useNodeStore = defineStore('nodeStore', () => {
     'endpoint_success',
     'endpoint_error',
     'transaction_status_updated',
+    'transaction_appeal_updated',
     'consensus_event',
     'contract_stdout',
     'read_contract',

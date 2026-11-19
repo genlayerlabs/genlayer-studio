@@ -1,36 +1,44 @@
 import { useTransactionsStore } from '@/stores';
-import type { TransactionItem } from '@/types';
+import type { TransactionHash } from 'genlayer-js/types';
 import { useWebSocketClient } from '@/hooks';
 
 export function useTransactionListener() {
   const transactionsStore = useTransactionsStore();
   const webSocketClient = useWebSocketClient();
+  const latestRefresh = new Map<TransactionHash, symbol>();
 
   function init() {
     webSocketClient.on('transaction_status_updated', handleTransactionUpdate);
     webSocketClient.on('transaction_appeal_updated', handleTransactionUpdate);
   }
 
-  async function handleTransactionUpdate(eventData: any) {
-    const newTx = await transactionsStore.getTransaction(eventData.data.hash);
+  async function handleTransactionUpdate(eventData: {
+    data: { hash: TransactionHash };
+  }) {
+    const { hash } = eventData.data;
+    const refresh = Symbol();
+    latestRefresh.set(hash, refresh);
 
-    const currentTx = transactionsStore.transactions.find(
-      (t: TransactionItem) => t.hash === eventData.data.hash,
-    );
+    try {
+      const newTx = await transactionsStore.getTransaction(hash);
+      // Rapid consensus transitions can return receipts out of request order.
+      if (latestRefresh.get(hash) !== refresh) return;
 
-    if (currentTx && !newTx) {
-      console.log('Server tx not found for local tx:', currentTx);
-      // We're cleaning up local txs that don't exist on the server anymore
-      transactionsStore.removeTransaction(currentTx);
-      return;
+      const currentTx = transactionsStore.transactions.find(
+        (t) => t.hash === hash,
+      );
+      if (!currentTx) return;
+
+      if (!newTx) {
+        console.log('Server tx not found for local tx:', currentTx);
+        transactionsStore.removeTransaction(currentTx);
+        return;
+      }
+
+      transactionsStore.updateTransaction(newTx);
+    } finally {
+      if (latestRefresh.get(hash) === refresh) latestRefresh.delete(hash);
     }
-
-    if (!currentTx) {
-      // This happens regularly when local transactions get cleared (e.g. user clears all txs or deploys new contract instance)
-      return;
-    }
-
-    transactionsStore.updateTransaction(newTx);
   }
 
   return {
