@@ -1214,18 +1214,6 @@ class ConsensusAlgorithm:
                     transaction_hash=transaction.hash,
                 )
             )
-            self.msg_handler.send_message(
-                log_event=LogEvent(
-                    "transaction_appeal_updated",
-                    EventType.INFO,
-                    EventScope.CONSENSUS,
-                    "Set transaction appealed",
-                    {
-                        "hash": context.transaction.hash,
-                    },
-                ),
-                log_to_terminal=False,
-            )
 
         else:
             transactions_processor.set_transaction_appeal(transaction.hash, False)
@@ -1332,18 +1320,6 @@ class ConsensusAlgorithm:
                 "appeal_committee_unavailable",
             )
             context.transaction.appealed = False
-            self.msg_handler.send_message(
-                log_event=LogEvent(
-                    "transaction_appeal_updated",
-                    EventType.INFO,
-                    EventScope.CONSENSUS,
-                    "Set transaction appealed",
-                    {
-                        "hash": context.transaction.hash,
-                    },
-                ),
-                log_to_terminal=False,
-            )
             context.transactions_processor.set_transaction_appeal_processing_time(
                 context.transaction.hash
             )

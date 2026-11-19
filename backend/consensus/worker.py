@@ -33,9 +33,7 @@ from backend.protocol_rpc.fees import acceptance_dispatch_pending
 _NoValidatorsError = NoValidatorsAvailableError
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import (
-    EventScope,
-    EventType,
-    LogEvent,
+    transaction_appeal_updated_event,
 )
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
@@ -2106,15 +2104,8 @@ class ConsensusWorker:
             self._record_upgrade_progress(fin_session, upgrade_hash, progress)
             fin_session.commit()
             if refund is not None:
-                self.msg_handler.send_message(
-                    log_event=LogEvent(
-                        "transaction_appeal_updated",
-                        EventType.INFO,
-                        EventScope.CONSENSUS,
-                        "Appeal refunded: contract upgraded",
-                        {"hash": predecessor},
-                    ),
-                    log_to_terminal=False,
+                self._publish_appeal_update(
+                    predecessor, "Appeal refunded because the contract was upgraded"
                 )
 
             transaction_data = TransactionsProcessor(
@@ -2439,7 +2430,6 @@ class ConsensusWorker:
             ):
                 # Convert to Transaction domain object
                 transaction = Transaction.from_dict(appeal_data)
-                is_leader_appeal = transaction.status == TransactionStatus.UNDETERMINED
 
                 logger.info(
                     f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
@@ -2459,7 +2449,7 @@ class ConsensusWorker:
                 accounts_manager = accounts_manager_factory(session)
 
                 async with self.validators_manager.snapshot() as validators_snapshot:
-                    if is_leader_appeal:
+                    if transaction.status == TransactionStatus.UNDETERMINED:
                         # Leader appeal
                         await self.consensus_algorithm.process_leader_appeal(
                             transaction,
@@ -2506,19 +2496,7 @@ class ConsensusWorker:
                     transaction.hash, include_pending=False
                 )
                 session.commit()
-                if is_leader_appeal:
-                    # The frontend fetches the receipt when this event arrives.
-                    self.msg_handler.send_message(
-                        LogEvent(
-                            "transaction_appeal_updated",
-                            EventType.INFO,
-                            EventScope.CONSENSUS,
-                            "Leader appeal processing finished",
-                            {"hash": tx_hash},
-                            transaction_hash=tx_hash,
-                        ),
-                        log_to_terminal=False,
-                    )
+                self._publish_appeal_update(transaction.hash, "Appeal finished")
                 self._generic_error_retries.pop(transaction.hash, None)
                 self._leader_crash_retries.pop(transaction.hash, None)
                 logger.info(
@@ -2563,6 +2541,17 @@ class ConsensusWorker:
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during appeal"
             )
+
+    def _publish_appeal_update(self, tx_hash: str, message: str) -> None:
+        # Studio fetches the receipt when this event arrives. The outcome is
+        # already committed, so a notification error must not retry the appeal.
+        try:
+            self.msg_handler.send_message(
+                transaction_appeal_updated_event(tx_hash, message),
+                log_to_terminal=False,
+            )
+        except Exception:
+            logger.exception("Failed to publish appeal update for {}", tx_hash)
 
     def _log_query_result(
         self,

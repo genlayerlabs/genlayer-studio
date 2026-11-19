@@ -84,3 +84,14 @@ class LogEvent:
             "client_id": self.client_session_id,
             "account_address": self.account_address,
         }
+
+
+def transaction_appeal_updated_event(tx_hash: str, message: str) -> LogEvent:
+    return LogEvent(
+        "transaction_appeal_updated",
+        EventType.INFO,
+        EventScope.CONSENSUS,
+        message,
+        {"hash": tx_hash},
+        transaction_hash=tx_hash,
+    )
