@@ -2692,6 +2692,8 @@ class PendingState(TransactionState):
             is_initial_activation
             and context.transaction.type != TransactionType.SEND
             and (
+                # Defensive for direct callers: the worker's manager raises
+                # rather than returning a missing snapshot.
                 context.validators_snapshot is None
                 or not context.validators_snapshot.nodes
             )
@@ -2699,7 +2701,15 @@ class PendingState(TransactionState):
             tx_hash = context.transaction.hash
             value_sender = context.transaction.from_address
             if value_sender:
-                context.accounts_manager.refund_tx_value(tx_hash, value_sender)
+                # Recovery clears consensus fields but can retain an activation
+                # credit. Reverse that credit before trying the uncredited refund.
+                refunded_activated = (
+                    context.accounts_manager.refund_activated_tx_value_once(
+                        tx_hash, context.transaction.to_address, value_sender
+                    )
+                )
+                if not refunded_activated:
+                    context.accounts_manager.refund_tx_value(tx_hash, value_sender)
             fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
             fee_sender = (
                 fee_accounting.get("sender")
@@ -2710,8 +2720,10 @@ class PendingState(TransactionState):
                 context.accounts_manager.cancel_tx_fee_accounting_once(
                     tx_hash, fee_sender, "no_validators_available"
                 )
+            # The status dispatch below commits refunds, error and CANCELED
+            # together, so recovery cannot execute a refunded PENDING transaction.
             context.transactions_processor.set_transaction_result(
-                tx_hash, {"error": "no_validators_available"}
+                tx_hash, {"error": "no_validators_available"}, commit=False
             )
             context.msg_handler.send_message(
                 LogEvent(

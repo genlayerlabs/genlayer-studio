@@ -1393,8 +1393,9 @@ class TransactionsProcessor:
         self.session.commit()
 
     def set_transaction_result(
-        self, transaction_hash: str, consensus_data: dict | None
+        self, transaction_hash: str, consensus_data: dict | None, *, commit: bool = True
     ):
+        """Store the result; defer commit when joining an atomic status transition."""
         result = self.session.execute(
             text(
                 "UPDATE transactions SET consensus_data = CAST(:data AS jsonb) WHERE hash = :hash"
@@ -1411,7 +1412,8 @@ class TransactionsProcessor:
             )
             return
 
-        self.session.commit()
+        if commit:
+            self.session.commit()
 
     def update_transaction_data(self, transaction_hash: str, data: dict | None):
         result = self.session.execute(

@@ -488,16 +488,23 @@ class TestMintOnDemand:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_snapshot", [False, True])
+@pytest.mark.parametrize("with_fees", [False, True])
 @pytest.mark.parametrize(
     "tx_type", [TransactionType.RUN_CONTRACT, TransactionType.DEPLOY_CONTRACT]
 )
-async def test_empty_validator_set_cancels_before_activation(missing_snapshot, tx_type):
+async def test_empty_validator_set_cancels_before_activation(
+    missing_snapshot, tx_type, with_fees
+):
     context = _pending_context_with_validator_capacity(requested=5, available=0)
     tx = context.transactions_processor.get_transaction_by_hash.return_value
     tx["type"] = tx_type.value
     tx["value"] = 17
+    context.accounts_manager.refund_activated_tx_value_once.return_value = False
     fee_sender = "0x3333333333333333333333333333333333333333"
-    tx["data"][FEE_ACCOUNTING_KEY] = {"sender": fee_sender}
+    if with_fees:
+        tx["data"][FEE_ACCOUNTING_KEY] = {"sender": fee_sender}
+    else:
+        fee_sender = tx["from_address"]
     if missing_snapshot:
         context.validators_snapshot = None
 
@@ -507,7 +514,7 @@ async def test_empty_validator_set_cancels_before_activation(missing_snapshot, t
         tx["hash"], TransactionStatus.CANCELED, True
     )
     context.transactions_processor.set_transaction_result.assert_called_once_with(
-        tx["hash"], {"error": "no_validators_available"}
+        tx["hash"], {"error": "no_validators_available"}, commit=False
     )
     context.accounts_manager.refund_tx_value.assert_called_once_with(
         tx["hash"], tx["from_address"]
@@ -524,10 +531,17 @@ async def test_empty_validator_set_cancels_before_activation(missing_snapshot, t
 
 
 @pytest.mark.asyncio
-async def test_empty_validator_set_preserves_appeal_recovery():
+@pytest.mark.parametrize(
+    "reentry",
+    [
+        {"appealed": True},
+        {"consensus_history": {"current_status_changes": ["PENDING", "PROPOSING"]}},
+    ],
+)
+async def test_empty_validator_set_preserves_appeal_recovery(reentry):
     context = _pending_context_with_validator_capacity(requested=5, available=0)
     tx = context.transactions_processor.get_transaction_by_hash.return_value
-    tx["appealed"] = True
+    tx.update(reentry)
 
     with pytest.raises(consensus_base.NoValidatorsAvailableError):
         await PendingState().handle(context)
