@@ -144,7 +144,9 @@ def test_gpt4_json_not_supported():
         receipt = transaction_response_call_1["consensus_data"]["leader_receipt"][0]
         assert ExecutionResultStatus.SUCCESS.value == receipt["execution_result"]
 
-        receipt = transaction_response_call_1["consensus_data"]["leader_receipt"][1]
+        receipt = transaction_response_call_1["studio_data"][
+            "leader_validation_receipt"
+        ]
         assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
         assert "response_format" in receipt["genvm_result"]["stderr"]
 

@@ -753,7 +753,7 @@ const handleCancelTransaction = async () => {
 };
 
 function prettifyTxData(x: any): any {
-  const oldResult = x?.consensus_data?.leader_receipt?.[0].result;
+  const oldResult = x?.consensus_data?.leader_receipt?.[0]?.result;
 
   if (oldResult) {
     try {
@@ -764,7 +764,7 @@ function prettifyTxData(x: any): any {
     }
   }
 
-  const oldCalldata = x?.consensus_data?.leader_receipt?.[0].calldata;
+  const oldCalldata = x?.consensus_data?.leader_receipt?.[0]?.calldata;
 
   if (oldCalldata) {
     try {
@@ -790,7 +790,7 @@ function prettifyTxData(x: any): any {
     }
   }
 
-  const oldEqOutputs = x?.consensus_data?.leader_receipt?.[0].eq_outputs;
+  const oldEqOutputs = x?.consensus_data?.leader_receipt?.[0]?.eq_outputs;
   if (oldEqOutputs == undefined) {
     return x;
   }
@@ -810,7 +810,7 @@ function prettifyTxData(x: any): any {
             ...x.consensus_data.leader_receipt[0],
             eq_outputs: newEqOutputs,
           },
-          x.consensus_data.leader_receipt[1],
+          ...x.consensus_data.leader_receipt.slice(1),
         ],
       },
     };

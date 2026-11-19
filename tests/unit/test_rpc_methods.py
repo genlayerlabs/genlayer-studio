@@ -65,7 +65,14 @@ def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch
                         "address": "0xvalidator",
                         "private_key": "0xsecret",
                     }
-                }
+                },
+                {
+                    "vote": "agree",
+                    "node_config": {
+                        "address": "0xvalidator",
+                        "private_key": "0xsecret",
+                    },
+                },
             ],
             "validators": [
                 {
@@ -86,13 +93,38 @@ def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch
 
     leader_config = result["consensus_data"]["leader_receipt"][0]["node_config"]
     validator_config = result["consensus_data"]["validators"][0]["node_config"]
+    assert len(result["consensus_data"]["leader_receipt"]) == 1
     assert leader_config == {"address": "0xvalidator"}
     assert validator_config == {"address": "0xvalidator2"}
+    assert result["studio_data"] == {
+        "leader_validation_receipt": {
+            "vote": "agree",
+            "node_config": {"address": "0xvalidator"},
+        }
+    }
+    assert len(stored_transaction["consensus_data"]["leader_receipt"]) == 2
+    assert "studio_data" not in stored_transaction
     assert (
         stored_transaction["consensus_data"]["leader_receipt"][0]["node_config"][
             "private_key"
         ]
         == "0xsecret"
+    )
+
+
+@pytest.mark.parametrize(
+    "receipts", [None, [], [{"result": "0x00"}], {"result": "0x00"}]
+)
+def test_eth_get_transaction_by_hash_preserves_single_or_absent_leader_receipt(
+    receipts,
+):
+    transactions_processor = MagicMock()
+    transaction = {"consensus_data": {"leader_receipt": receipts}}
+    transactions_processor.get_transaction_by_hash.return_value = transaction
+
+    assert (
+        endpoints.get_transaction_by_hash(transactions_processor, "0xabc")
+        == transaction
     )
 
 
