@@ -7,6 +7,7 @@ DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 
 import os
+import math
 import asyncio
 from typing import Any, Callable, List, Iterable, Literal
 import time
@@ -304,7 +305,7 @@ def _slot_budget_seconds(
     transaction: Transaction,
     role: Literal["leader", "validator"],
 ) -> float:
-    """Use the funded slot deadline, with defaults for gasless and legacy rows."""
+    """Apply the operator cap and, when enabled, the bounded funded deadline."""
     if role == "leader":
         allocation_key = "leaderTimeunitsAllocation"
         env_key = "CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS"
@@ -314,23 +315,35 @@ def _slot_budget_seconds(
         env_key = "CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS"
         default = DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS
 
+    cap = _positive_timeout(env_key) or float(default)
+    floor = _positive_timeout("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS")
+    if floor is None:
+        return cap
+
     accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
     distribution = accounting.get("fees_distribution") or {}
-    allocation = int(distribution.get(allocation_key) or 0)
-    if allocation > 0:
-        # Consensus time units are seconds of GenVM wall-clock runtime.
-        return float(allocation)
-
-    raw_timeout = os.getenv(env_key)
-    if raw_timeout is None:
-        return float(default)
     try:
-        timeout = float(raw_timeout)
+        allocation = int(distribution.get(allocation_key) or 0)
+    except (TypeError, ValueError):
+        return cap
+    if allocation <= 0:
+        return cap
+
+    policy = StudioFeePolicy.from_env()
+    if role == "leader":
+        minimum, maximum = policy.min_propose_timeunits, policy.max_propose_timeunits
+    else:
+        minimum, maximum = policy.min_commit_timeunits, policy.max_commit_timeunits
+    # One protocol time unit is one second of GenVM wall-clock runtime.
+    return min(cap, maximum, max(floor, minimum, allocation))
+
+
+def _positive_timeout(env_key: str) -> float | None:
+    try:
+        timeout = float(os.getenv(env_key, ""))
     except ValueError:
-        return float(default)
-    if timeout <= 0:
-        return float(default)
-    return timeout
+        return None
+    return timeout if math.isfinite(timeout) and timeout > 0 else None
 
 
 def node_factory(

@@ -5,15 +5,22 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.consensus import base as consensus
-from backend.consensus.base import CommittingState, ProposingState, RevealingState
+from backend.consensus.base import (
+    CommittingState,
+    LeaderTimeoutState,
+    ProposingState,
+    RevealingState,
+)
 from backend.consensus.effects import (
     SetTransactionResultEffect,
     UpdateConsensusHistoryEffect,
 )
 from backend.database_handler.types import ConsensusData
+from backend.domain.types import TransactionExecutionMode
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.types import ExecutionMode, ExecutionResultStatus, Receipt, Vote
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 
 class _MessageHandler:
@@ -279,6 +286,56 @@ def _make_context(
         remaining_validators=[{"address": address} for address in validators],
         consensus_data=ConsensusData(votes={}, leader_receipt=None, validators=[]),
         validation_results=[],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["leader", "validator"])
+async def test_consensus_state_times_out_at_funded_allocation(monkeypatch, role):
+    monkeypatch.setenv("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS", "1")
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def exec_hung(_transaction):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(exec_transaction=exec_hung),
+    )
+    context.transaction.data = {
+        FEE_ACCOUNTING_KEY: {
+            "fees_distribution": {
+                "leaderTimeunitsAllocation": 1 if role == "leader" else 4,
+                "validatorTimeunitsAllocation": 1 if role == "validator" else 4,
+            }
+        }
+    }
+    if role == "leader":
+        context.involved_validators = [context.leader]
+        context.transaction.execution_mode = TransactionExecutionMode.NORMAL
+        context.transaction.appeal_leader_timeout = False
+        next_state = await asyncio.wait_for(ProposingState().handle(context), 3)
+        assert isinstance(next_state, LeaderTimeoutState)
+        [receipt] = context.consensus_data.leader_receipt
+    else:
+        await asyncio.wait_for(CommittingState().handle(context), 3)
+        [receipt] = context.validation_results
+        assert receipt.vote == Vote.TIMEOUT
+
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert receipt.processing_time == 1000
+    assert (
+        receipt.genvm_result["error_code"] == f"CONSENSUS_{role.upper()}_EXEC_TIMEOUT"
     )
 
 
