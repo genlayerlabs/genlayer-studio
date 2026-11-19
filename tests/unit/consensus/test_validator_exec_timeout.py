@@ -154,7 +154,7 @@ async def test_committing_times_out_hung_validator_without_blocking(monkeypatch)
     """Outer slot timeout now produces a terminal TIMEOUT vote, not fatal IDLE."""
     monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "0.05")
 
-    transaction = SimpleNamespace(hash="tx-hash")
+    transaction = SimpleNamespace(hash="tx-hash", data=None)
 
     tx_processor = MagicMock()
     tx_processor.add_state_timestamp = MagicMock()
@@ -258,7 +258,7 @@ def _make_context(
     tx_processor.set_transaction_timestamp_last_vote = MagicMock()
 
     return SimpleNamespace(
-        transaction=SimpleNamespace(hash="tx-hash"),
+        transaction=SimpleNamespace(hash="tx-hash", data=None),
         transactions_processor=tx_processor,
         msg_handler=_MessageHandler(),
         consensus_service=MagicMock(),

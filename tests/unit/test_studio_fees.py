@@ -1490,6 +1490,38 @@ def test_internal_child_clamps_parent_rotations_to_its_own_fee_schedule():
     assert _child_config_rotation_rounds(1, {"calldata": b"legacy"}) == 1
 
 
+@pytest.mark.parametrize(
+    ("distribution", "expected"),
+    [
+        (
+            {"leaderTimeunitsAllocation": "90", "validatorTimeunitsAllocation": 180},
+            (90, 180),
+        ),
+        (
+            {"leaderTimeunitsAllocation": 0, "validatorTimeunitsAllocation": "0"},
+            (40, 50),
+        ),
+        (None, (40, 50)),
+    ],
+)
+def test_consensus_execution_deadlines_use_transaction_time_allocations(
+    monkeypatch, distribution, expected
+):
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "40")
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "50")
+    data = (
+        {FEE_ACCOUNTING_KEY: {"fees_distribution": distribution}}
+        if distribution is not None
+        else {"calldata": b"legacy"}
+    )
+    transaction = SimpleNamespace(data=data)
+
+    assert (
+        consensus_base._slot_budget_seconds(transaction, "leader"),
+        consensus_base._slot_budget_seconds(transaction, "validator"),
+    ) == expected
+
+
 def test_runtime_rotations_follow_each_normal_round_schedule_entry():
     accounting = _env_fee_accounting(
         _env_fees_distribution(appeals=2, rotations=[3, 1, 2])

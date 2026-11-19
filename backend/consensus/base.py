@@ -304,18 +304,22 @@ def _slot_budget_seconds(
     transaction: Transaction,
     role: Literal["leader", "validator"],
 ) -> float:
-    """Per-tx slot budget.
-
-    Future: read from transaction.sim_config / gas mechanism. Today: env var
-    fallback.
-    """
-    _ = transaction
+    """Use the funded slot deadline, with defaults for gasless and legacy rows."""
     if role == "leader":
+        allocation_key = "leaderTimeunitsAllocation"
         env_key = "CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS"
         default = DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS
     else:
+        allocation_key = "validatorTimeunitsAllocation"
         env_key = "CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS"
         default = DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS
+
+    accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    distribution = accounting.get("fees_distribution") or {}
+    allocation = int(distribution.get(allocation_key) or 0)
+    if allocation > 0:
+        # Consensus time units are seconds of GenVM wall-clock runtime.
+        return float(allocation)
 
     raw_timeout = os.getenv(env_key)
     if raw_timeout is None:
