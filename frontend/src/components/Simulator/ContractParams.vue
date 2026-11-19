@@ -5,6 +5,7 @@ import { onMounted, ref, watch } from 'vue';
 import {
   getDefaultValueForType,
   getComponentProps,
+  getTypeLabel,
 } from '../global/fields/fieldValues';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ArgData } from './ContractParams';
@@ -105,7 +106,7 @@ onMounted(() => {
         v-model="getArg(i).val"
         v-bind="getComponentProps(paramType)"
         :name="paramName"
-        :placeholder="`${paramType}`"
+        :placeholder="getTypeLabel(paramType)"
         :label="paramName"
       />
     </div>
@@ -120,7 +121,7 @@ onMounted(() => {
         v-model="getKwarg(paramName).val"
         v-bind="getComponentProps(paramType)"
         :name="paramName"
-        :placeholder="`${paramType}`"
+        :placeholder="getTypeLabel(paramType)"
         :label="paramName"
       />
     </div>

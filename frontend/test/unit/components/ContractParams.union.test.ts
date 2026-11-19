@@ -158,4 +158,14 @@ describe('union contract parameters', () => {
       expect(wrapper.get('input').attributes('placeholder')).toBe(label);
     },
   );
+  it.each([false, true])(
+    'uses a readable outer placeholder (keyword=%s)',
+    async (keyword) => {
+      const { wrapper } = await setup({ $or: ['string', 'null'] }, keyword);
+      expect(wrapper.find('[placeholder="string | None"]').exists()).toBe(true);
+      expect(wrapper.find('[placeholder="[object Object]"]').exists()).toBe(
+        false,
+      );
+    },
+  );
 });
