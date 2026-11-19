@@ -1,35 +1,39 @@
 <script setup lang="ts">
-import { useAccountsStore, type AccountInfo } from '@/stores';
+import { useAccountsStore, useNetworkStore, type AccountInfo } from '@/stores';
 import { notify } from '@kyvg/vue3-notification';
 import { PowerCircle, Wallet } from 'lucide-vue-next';
-import { ref, onMounted } from 'vue';
+import { computed, ref, watch } from 'vue';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { TrashIcon, CheckCircleIcon } from '@heroicons/vue/16/solid';
-import { useRpcClient } from '@/hooks';
+import { formatGenBalance } from '@/utils/tokenAmount';
+import FundAccountPopover from './FundAccountPopover.vue';
 const store = useAccountsStore();
-const rpcClient = useRpcClient();
+const networkStore = useNetworkStore();
+const props = defineProps<{
+  active?: boolean;
+  account: AccountInfo;
+  canDelete?: boolean;
+}>();
 
-const balance = ref<string | null>(null);
-
-const formatBalance = (hexBalance: string): string => {
-  const wei = BigInt(hexBalance);
-  const gen = Number(wei) / 1e18;
-  if (gen === 0) return '0';
-  if (gen < 0.001) return '<0.001';
-  return gen.toLocaleString(undefined, { maximumFractionDigits: 3 });
-};
-
-onMounted(async () => {
-  try {
-    const hex = await rpcClient.getBalance(props.account.address);
-    balance.value = formatBalance(hex as string);
-  } catch {
-    balance.value = null;
-  }
+const balance = computed(() => store.balances[props.account.address]);
+const highlighted = ref(false);
+watch(balance, (value, previous, onCleanup) => {
+  highlighted.value =
+    value !== undefined && previous !== undefined && value > previous;
+  if (!highlighted.value) return;
+  const timer = setTimeout(() => {
+    highlighted.value = false;
+  }, 1200);
+  onCleanup(() => clearTimeout(timer));
 });
+watch(
+  [() => props.account.address, () => networkStore.currentNetwork],
+  ([address]) => void store.refreshBalance(address),
+  { immediate: true },
+);
 
-const setCurentAddress = () => {
-  store.setCurrentAccount(props.account as AccountInfo);
+const setCurrentAddress = () => {
+  store.setCurrentAccount(props.account);
   notify({
     title: 'Active account changed',
     type: 'success',
@@ -38,7 +42,7 @@ const setCurentAddress = () => {
 
 const deleteAddress = () => {
   try {
-    store.removeAccount(props.account as AccountInfo);
+    store.removeAccount(props.account);
     notify({
       title: 'Account deleted',
       type: 'success',
@@ -53,20 +57,18 @@ const deleteAddress = () => {
   }
 };
 
-const props = defineProps<{
-  active?: boolean;
-  account: AccountInfo;
-  canDelete?: boolean;
-}>();
-
 const showConfirmDelete = ref(false);
 </script>
 
 <template>
-  <div>
+  <div
+    class="group flex items-center gap-2 bg-slate-100 p-2 hover:bg-slate-200 dark:bg-gray-700 dark:hover:bg-gray-600"
+  >
     <button
-      class="group flex w-full flex-row items-center justify-between gap-2 truncate bg-slate-100 p-2 text-left hover:bg-slate-200 dark:bg-gray-700 dark:hover:bg-gray-600"
-      @click="setCurentAddress()"
+      type="button"
+      v-close-popper
+      class="flex min-w-0 grow items-center gap-2 text-left"
+      @click="setCurrentAddress"
     >
       <div>
         <PowerCircle
@@ -85,10 +87,11 @@ const showConfirmDelete = ref(false);
           {{ account.address }}
         </span>
         <span
-          v-if="balance !== null"
-          class="font-mono text-[10px] text-gray-500 dark:text-gray-400"
+          v-if="balance !== undefined"
+          class="w-fit rounded font-mono text-[10px] text-gray-500 transition-colors dark:text-gray-400"
+          :class="{ 'bg-green-200 dark:bg-green-900': highlighted }"
         >
-          {{ balance }} GEN
+          {{ formatGenBalance(balance) }} GEN
         </span>
       </div>
 
@@ -97,37 +100,41 @@ const showConfirmDelete = ref(false);
         class="h-4 w-4 text-blue-500"
         v-tooltip="'External Wallet'"
       />
-
-      <div
-        class="flex flex-row items-center gap-1 opacity-0 group-hover:opacity-100"
-      >
-        <CopyTextButton :text="account.address" v-tooltip="'Copy Address'" />
-
-        <Transition mode="out-in" v-if="canDelete">
-          <button
-            v-if="!showConfirmDelete"
-            data-testid="account-item-delete"
-            @click.stop="showConfirmDelete = true"
-            v-tooltip="'Delete Account'"
-          >
-            <TrashIcon
-              class="h-5 w-5 p-[2px] text-slate-400 transition-colors hover:text-slate-800 active:scale-90 dark:hover:text-white"
-            />
-          </button>
-
-          <button
-            v-else
-            data-testid="account-item-confirm-delete"
-            @click.stop="deleteAddress"
-            v-tooltip="'Confirm deletion'"
-          >
-            <CheckCircleIcon
-              class="h-5 w-5 p-[2px] text-red-500 transition-colors hover:text-red-400 active:scale-90"
-            />
-          </button>
-        </Transition>
-      </div>
     </button>
+
+    <div class="flex shrink-0 items-center gap-1">
+      <CopyTextButton :text="account.address" v-tooltip="'Copy Address'" />
+
+      <FundAccountPopover
+        v-if="networkStore.isStudio && account.type === 'local'"
+        :account="account"
+        show-label
+      />
+
+      <Transition mode="out-in" v-if="canDelete">
+        <button
+          v-if="!showConfirmDelete"
+          data-testid="account-item-delete"
+          @click.stop="showConfirmDelete = true"
+          v-tooltip="'Delete Account'"
+        >
+          <TrashIcon
+            class="h-5 w-5 p-[2px] text-slate-400 transition-colors hover:text-slate-800 active:scale-90 dark:hover:text-white"
+          />
+        </button>
+
+        <button
+          v-else
+          data-testid="account-item-confirm-delete"
+          @click.stop="deleteAddress"
+          v-tooltip="'Confirm deletion'"
+        >
+          <CheckCircleIcon
+            class="h-5 w-5 p-[2px] text-red-500 transition-colors hover:text-red-400 active:scale-90"
+          />
+        </button>
+      </Transition>
+    </div>
   </div>
 </template>
 

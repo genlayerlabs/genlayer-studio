@@ -1,8 +1,10 @@
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
 import { useShortAddress, useWebSocketClient } from '@/hooks';
+import { useRpcClient } from '@/hooks/useRpcClient';
+import { useNetworkStore } from './network';
 import { getAddress } from 'viem';
 
 export interface AccountInfo {
@@ -14,6 +16,57 @@ export interface AccountInfo {
 export const useAccountsStore = defineStore('accountsStore', () => {
   const { shorten } = useShortAddress();
   const webSocketClient = useWebSocketClient();
+
+  const rpcClient = useRpcClient();
+  const networkStore = useNetworkStore();
+  const balances = ref<Partial<Record<Address, bigint>>>({});
+  const funding = ref<Partial<Record<Address, boolean>>>({});
+  const balanceRequests = new Map<Address, symbol>();
+
+  watch(
+    () => networkStore.currentNetwork,
+    () => {
+      balances.value = {};
+      balanceRequests.clear();
+    },
+    { flush: 'sync' },
+  );
+
+  async function refreshBalance(address: Address) {
+    const request = Symbol();
+    balanceRequests.set(address, request);
+    try {
+      const balance = BigInt(await rpcClient.getBalance(address));
+      if (balanceRequests.get(address) === request) {
+        balances.value[address] = balance;
+      }
+    } catch {
+      // Keep the most recent successful balance for this network.
+    } finally {
+      if (balanceRequests.get(address) === request) {
+        balanceRequests.delete(address);
+      }
+    }
+  }
+
+  async function fundAccount(account: AccountInfo, amount: bigint) {
+    const { address } = account;
+    if (
+      !networkStore.isStudio ||
+      account.type !== 'local' ||
+      funding.value[address]
+    )
+      return;
+    const network = networkStore.currentNetwork;
+    funding.value[address] = true;
+    try {
+      await rpcClient.fundAccount(address, amount.toString());
+      if (network === networkStore.currentNetwork)
+        await refreshBalance(address);
+    } finally {
+      delete funding.value[address];
+    }
+  }
 
   // Store all accounts (both local and external wallet)
   const accounts = ref<AccountInfo[]>([]);
@@ -246,6 +299,10 @@ export const useAccountsStore = defineStore('accountsStore', () => {
 
   return {
     accounts,
+    balances,
+    funding,
+    refreshBalance,
+    fundAccount,
     selectedAccount,
     currentUserAddress,
     connectExternalWallet,
