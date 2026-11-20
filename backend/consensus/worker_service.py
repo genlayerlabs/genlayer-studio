@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import FastAPI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
+from backend.env_loader import load_env
 
 from backend.consensus.worker import ConsensusWorker
 from backend.protocol_rpc.message_handler.redis_worker_handler import (
@@ -47,7 +47,7 @@ logger.add(
 )
 
 # Load environment variables
-load_dotenv()
+load_env()
 
 
 def get_db_name(database: str) -> str:

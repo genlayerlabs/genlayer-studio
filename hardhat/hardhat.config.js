@@ -5,19 +5,21 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 function readDotenvVariable(key) {
-  try {
-    const dotenvPath = path.resolve(__dirname, "..", ".env");
-    const contents = fs.readFileSync(dotenvPath, "utf8");
-    const match = contents.match(
-      new RegExp(
-        `^\\\\s*${key}\\\\s*=\\\\s*['\\"]?(\\\\d+)['\\"]?\\\\s*(?:#.*)?$`,
-        "m"
-      )
-    );
-    return match?.[1] ?? null;
-  } catch (_) {
-    return null;
+  // `.env` (user overrides) wins over `.env.default`.
+  for (const name of [".env", ".env.default"]) {
+    try {
+      const dotenvPath = path.resolve(__dirname, "..", name);
+      const contents = fs.readFileSync(dotenvPath, "utf8");
+      const match = contents.match(
+        new RegExp(
+          `^\\\\s*${key}\\\\s*=\\\\s*['\\"]?(\\\\d+)['\\"]?\\\\s*(?:#.*)?$`,
+          "m"
+        )
+      );
+      if (match) return match[1];
+    } catch (_) {}
   }
+  return null;
 }
 
 function getChainId() {

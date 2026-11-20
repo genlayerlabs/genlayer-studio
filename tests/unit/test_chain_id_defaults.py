@@ -15,7 +15,7 @@ def _decimal_capture(path: str, pattern: str) -> int:
 def test_tracked_local_chain_id_defaults_stay_aligned():
     defaults = {
         "environment": _decimal_capture(
-            ".env.example", r"^GENLAYER_CHAIN_ID=[\'\"]?(\d+)[\'\"]?$"
+            ".env.default", r"^GENLAYER_CHAIN_ID=[\'\"]?(\d+)[\'\"]?$"
         ),
         "backend": _decimal_capture(
             "backend/node/base.py",

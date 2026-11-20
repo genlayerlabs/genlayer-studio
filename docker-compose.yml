@@ -164,6 +164,7 @@ services:
     expose:
       - "${RPCPORT}"
     volumes:
+      - ./.env.default:/app/.env.default
       - ./.env:/app/.env
       - ./backend:/app/backend
       - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
@@ -356,6 +357,7 @@ services:
       - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
       - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
     volumes:
+      - ./.env.default:/app/.env.default
       - ./.env:/app/.env
       - ./backend:/app/backend
       - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache

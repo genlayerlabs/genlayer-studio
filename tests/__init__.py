@@ -1,3 +1,3 @@
-from dotenv import load_dotenv
+from backend.env_loader import load_env
 
-load_dotenv()
+load_env()
