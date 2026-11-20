@@ -1,11 +1,14 @@
 # Default Compose entry point (`docker compose up`).
-# Layers the configuration for ${VAR} interpolation: `.env.default` (tracked
-# defaults) first, then the project-level `.env` (your overrides, optional),
-# which Compose loads automatically and which wins. Compose warns that both this
-# file and docker-compose.yml exist; compose.yaml is the one it uses.
-# Explicit `-f docker-compose.yml ...` callers (CI, scripts) bypass this file: they must
-# provide the defaults themselves, as CI does by copying `.env.example` (a mirror of
-# `.env.default`) to `.env`, or pass `--env-file .env.default --env-file .env`.
+# Interpolation of ${VAR} uses `.env.default` (tracked defaults) and the project
+# `.env` (your optional overrides), which Compose loads automatically and which
+# wins. Compose reads each file on its own, so a `.env` value cannot reference
+# a key that only `.env.default` defines (it expands to empty); write the full
+# value, or run `docker compose --env-file .env.default --env-file .env ...`,
+# which layers both files (the Python backend layers them in either case).
+# Compose warns that both this file and docker-compose.yml exist; it uses this one.
+# Explicit `-f docker-compose.yml ...` callers bypass this file and only get the
+# project `.env`. In CI that is a full copy of `.env.example` (a mirror of
+# `.env.default`); otherwise pass `--env-file .env.default --env-file .env`.
 include:
   - path: docker-compose.yml
     env_file:
