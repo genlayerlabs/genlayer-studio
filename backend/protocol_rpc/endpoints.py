@@ -107,7 +107,12 @@ import base64
 import hashlib
 import os
 import secrets as secrets_module
-from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+from backend.protocol_rpc.message_handler.types import (
+    LogEvent,
+    EventType,
+    EventScope,
+    transaction_appeal_updated_event,
+)
 from backend.protocol_rpc.types import (
     DecodedRollupTransaction,
     DecodedRollupTransactionData,
@@ -2848,20 +2853,10 @@ def _handle_appeal_or_top_up_and_submit(
         raise
     if emit_event:
         msg_handler.send_message(
-            log_event=_transaction_appeal_updated_event(tx_id),
+            log_event=transaction_appeal_updated_event(tx_id, "Appeal admitted"),
             log_to_terminal=False,
         )
     return tx_id
-
-
-def _transaction_appeal_updated_event(tx_id: str) -> LogEvent:
-    return LogEvent(
-        "transaction_appeal_updated",
-        EventType.INFO,
-        EventScope.CONSENSUS,
-        "Set transaction appealed",
-        {"hash": tx_id},
-    )
 
 
 def _handle_finalize_transaction(
@@ -3282,7 +3277,9 @@ def _send_raw_transaction_impl(
                     decoded_rollup_transaction=decoded_rollup_transaction,
                     emit_event=False,
                 )
-                post_commit_event = _transaction_appeal_updated_event(appealed_tx_id)
+                post_commit_event = transaction_appeal_updated_event(
+                    appealed_tx_id, "Appeal admitted"
+                )
             elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
                 _handle_top_up_fees(
                     accounts_manager=accounts_manager,
