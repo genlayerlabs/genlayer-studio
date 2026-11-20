@@ -65,7 +65,6 @@ class TestLlmErc20:
         assert contract.get_balance_of(alice_hex) == 900
         assert contract.get_balance_of(bob_hex) == 100
 
-
     def test_strict_eq_input_ignores_llm_formatting(
         self, direct_vm, direct_deploy, direct_alice, direct_bob
     ):
