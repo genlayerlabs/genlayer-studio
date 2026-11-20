@@ -305,7 +305,8 @@ async def _captured_request_extra(monkeypatch) -> dict:
             ),
             timeout=5,
             is_sync=False,
-            message={"is_init": True, "contract_address": Address(PARENT)},
+            message={"contract_address": Address(PARENT)},
+            code=b"",
         )
     assert "create2" not in captured
     return captured["request_extra"]
@@ -347,7 +348,8 @@ async def test_vendored_host_always_sends_create2(monkeypatch, configured):
             manager_client=client,
             ctx=Context(),
             is_sync=False,
-            message={"is_init": True, "contract_address": Address(PARENT)},
+            message={"contract_address": Address(PARENT)},
+            code=b"",
             host="unix://test",
             calldata=b"",
             bucket_totals=base_host.default_bucket_totals(3),
