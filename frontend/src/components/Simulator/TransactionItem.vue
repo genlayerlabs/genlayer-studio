@@ -325,7 +325,7 @@ function toBigIntAmount(value: unknown): bigint | null {
 
 function formatNumber(value: unknown): string {
   const amount = toBigIntAmount(value);
-  return amount === null ? '-' : amount.toLocaleString();
+  return amount === null ? '-' : amount.toLocaleString('en-US');
 }
 
 function formatGenFromWei(wei: bigint): string {
@@ -336,12 +336,12 @@ function formatGenFromWei(wei: bigint): string {
   const remainder = absWei % weiPerGen;
   const sign = negative ? '-' : '';
 
-  if (remainder === 0n) return `${sign}${whole.toLocaleString()}`;
+  if (remainder === 0n) return `${sign}${whole.toLocaleString('en-US')}`;
 
   const fraction = remainder.toString().padStart(18, '0');
   const trimmed = trimTrailingZeroes(fraction);
   const decimals = Math.min(6, Math.max(3, trimmed.length));
-  return `${sign}${whole.toLocaleString()}.${fraction.slice(0, decimals)}`;
+  return `${sign}${whole.toLocaleString('en-US')}.${fraction.slice(0, decimals)}`;
 }
 
 function trimTrailingZeroes(value: string): string {
@@ -356,7 +356,7 @@ function formatFeeAmount(value: unknown): string {
   const amount = toBigIntAmount(value);
   if (amount === null) return '-';
 
-  const raw = `${amount.toLocaleString()} wei`;
+  const raw = `${amount.toLocaleString('en-US')} wei`;
   const absAmount = amount < 0n ? -amount : amount;
   if (absAmount < 1_000_000_000_000n) return raw;
 
