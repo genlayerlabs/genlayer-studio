@@ -133,6 +133,57 @@ describe('useNodeStore', () => {
     expect(nodeStore.validators).to.deep.include(newValidatorData);
   });
 
+  it('should warn when the new validator LLM provider check fails', async () => {
+    (notify as unknown as Mock).mockClear();
+    mockRpcClient.createValidator.mockResolvedValue({
+      ...testValidator1,
+      llm_provider_available: false,
+    });
+
+    await nodeStore.createNewValidator(testValidator1);
+
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'LLM provider check failed',
+        type: 'warn',
+      }),
+    );
+  });
+
+  it('should not warn when the validator LLM provider check passes', async () => {
+    (notify as unknown as Mock).mockClear();
+    mockRpcClient.createValidator.mockResolvedValue({
+      ...testValidator1,
+      llm_provider_available: true,
+    });
+
+    await nodeStore.createNewValidator(testValidator1);
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('should warn when the updated validator LLM provider check fails', async () => {
+    (notify as unknown as Mock).mockClear();
+    nodeStore.validators = [testValidator1];
+    mockRpcClient.updateValidator.mockResolvedValue({
+      ...testValidator1,
+      llm_provider_available: false,
+    });
+
+    await nodeStore.updateValidator(testValidator1, {
+      stake: 1,
+      provider: 'provider2',
+      model: 'model2',
+      config: '{}',
+      plugin: 'openai',
+      plugin_config: {},
+    });
+
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'warn' }),
+    );
+  });
+
   it('should update a validator', async () => {
     const validator = testValidator1;
     const newValidatorData = {

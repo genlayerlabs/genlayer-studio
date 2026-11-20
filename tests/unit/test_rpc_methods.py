@@ -329,6 +329,7 @@ def test_eth_get_block_by_hash_requests_no_contract_snapshot():
 async def test_update_validator_forwards_config_argument(monkeypatch):
     session = object()
     validators_manager = object()
+    genvm_manager = object()
     update_validator = AsyncMock(return_value={"address": "0xabc"})
     monkeypatch.setattr(rpc_methods.impl, "update_validator", update_validator)
 
@@ -348,12 +349,14 @@ async def test_update_validator_forwards_config_argument(monkeypatch):
         plugin_config,
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
     )
 
     assert result == {"address": "0xabc"}
     update_validator.assert_awaited_once_with(
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         validator_address="0xabc",
         stake=11,
         provider="openrouter",

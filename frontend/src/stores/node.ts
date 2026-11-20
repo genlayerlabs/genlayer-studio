@@ -120,6 +120,20 @@ export const useNodeStore = defineStore('nodeStore', () => {
     }
   }
 
+  // The backend probes the validator's LLM provider on create/update and
+  // saves the validator either way; surface a failed probe as a warning.
+  function warnIfLlmProviderUnavailable(
+    result: Partial<ValidatorModel> & { llm_provider_available?: boolean },
+  ) {
+    if (result?.llm_provider_available === false) {
+      notify({
+        title: 'LLM provider check failed',
+        text: `Validator saved, but ${result.provider}/${result.model} did not answer a test prompt. Check its API key, URL and model.`,
+        type: 'warn',
+      });
+    }
+  }
+
   async function updateValidator(
     validator: ValidatorModel,
     newValidatorData: NewValidatorDataModel,
@@ -144,6 +158,7 @@ export const useNodeStore = defineStore('nodeStore', () => {
     if (index >= 0) {
       validators.value.splice(index, 1, result);
     }
+    warnIfLlmProviderUnavailable(result);
   }
 
   const deleteValidator = async (validator: ValidatorModel) => {
@@ -171,11 +186,13 @@ export const useNodeStore = defineStore('nodeStore', () => {
       plugin_config,
     });
     validators.value.push(result);
+    warnIfLlmProviderUnavailable(result);
   }
 
   async function cloneValidator(validator: ValidatorModel) {
     const result = await rpcClient.createValidator(validator);
     validators.value.push(result);
+    warnIfLlmProviderUnavailable(result);
   }
 
   async function addProvider(providerData: NewProviderDataModel) {
