@@ -2,6 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TransactionItem from '@/components/Simulator/TransactionItem.vue';
 import { notify } from '@kyvg/vue3-notification';
+import { createClient } from 'genlayer-js';
+import { localnet } from 'genlayer-js/chains';
 
 const getTransactionMock = vi.fn();
 
@@ -31,12 +33,6 @@ vi.mock('@/utils/runtimeConfig', () => ({
 
 vi.mock('@/utils/explorerUrl', () => ({
   getExplorerUrl: vi.fn(() => 'http://explorer.local'),
-}));
-
-vi.mock('@/calldata/jsonifier', () => ({
-  resultToUserFriendlyJson: vi.fn((value) => value),
-  b64ToArray: vi.fn(() => []),
-  calldataToUserFriendlyJson: vi.fn(() => ({})),
 }));
 
 const parentHash = `0x${'a'.repeat(64)}` as const;
@@ -97,6 +93,58 @@ describe('TransactionItem messages (triggered transactions)', () => {
   beforeEach(() => {
     getTransactionMock.mockReset();
     vi.mocked(notify).mockReset();
+  });
+
+  it('shows the SDK response with one leader receipt and Studio validation data', async () => {
+    const validationReceipt = {
+      vote: 'agree',
+      result: 'AXg=',
+      calldata: 'AA==',
+      eq_outputs: { validator: 'AXg=' },
+    };
+    vi.stubGlobal('fetch', async (_url: string, options: { body: string }) => {
+      const { id, method } = JSON.parse(options.body);
+      expect(method).toBe('eth_getTransactionByHash');
+      return Response.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          hash: parentHash,
+          status: 'FINALIZED',
+          data: {},
+          consensus_data: {
+            leader_receipt: [{ execution_result: 'SUCCESS' }],
+          },
+          studio_data: { leader_validation_receipt: validationReceipt },
+        },
+      });
+    });
+    try {
+      const client = createClient({
+        chain: localnet,
+        endpoint: 'http://studio.invalid/api',
+      });
+      const data = await client.getTransaction({ hash: parentHash });
+      const wrapper = mountItem({ ...parentTransaction, data });
+      await wrapper.trigger('click');
+
+      const rendered = wrapper
+        .findComponent({ name: 'JsonViewer' })
+        .props('value');
+      expect(rendered.consensus_data.leader_receipt).toHaveLength(1);
+      expect(rendered.studio_data.leader_validation_receipt).toMatchObject({
+        vote: 'agree',
+        result: { raw: 'AXg=', status: 'rollback', payload: 'x' },
+        calldata: { base64: 'AA==' },
+        eq_outputs: { validator: { status: 'rollback', payload: 'x' } },
+      });
+      expect((data as { studio_data?: unknown }).studio_data).toEqual({
+        leader_validation_receipt: validationReceipt,
+      });
+      wrapper.unmount();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('lists triggered transactions as links in the details modal', async () => {

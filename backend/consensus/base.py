@@ -3624,7 +3624,10 @@ class RevealingState(TransactionState):
                 )
             )
 
-        # Leader receipt split
+        # A fresh proposal (including a rotation) starts with one leader
+        # execution receipt. Committing runs that leader's validation first,
+        # so the second stored receipt always belongs to the same leader.
+        # A validator appeal carries the original pair into the new jury round.
         if (
             context.consensus_data.leader_receipt
             and len(context.consensus_data.leader_receipt) == 1

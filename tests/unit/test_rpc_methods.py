@@ -53,7 +53,10 @@ def test_eth_get_transaction_by_hash_requests_no_contract_snapshot():
     )
 
 
-def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch):
+@pytest.mark.parametrize("lookup", ["hash", "address"])
+def test_transaction_lookups_separate_leader_receipts_and_redact_keys(
+    monkeypatch, lookup
+):
     monkeypatch.delenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", raising=False)
     transactions_processor = MagicMock()
     stored_transaction = {
@@ -65,7 +68,14 @@ def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch
                         "address": "0xvalidator",
                         "private_key": "0xsecret",
                     }
-                }
+                },
+                {
+                    "vote": "agree",
+                    "node_config": {
+                        "address": "0xvalidator",
+                        "private_key": "0xsecret",
+                    },
+                },
             ],
             "validators": [
                 {
@@ -77,22 +87,56 @@ def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch
             ],
         },
     }
-    transactions_processor.get_transaction_by_hash.return_value = stored_transaction
-
-    result = endpoints.get_transaction_by_hash(
-        transactions_processor=transactions_processor,
-        transaction_hash="0xabc",
-    )
+    if lookup == "address":
+        accounts_manager = MagicMock()
+        accounts_manager.is_valid_address.return_value = True
+        pending_transaction = {"hash": "0xdef", "consensus_data": None}
+        transactions_processor.get_transactions_for_address.return_value = [
+            stored_transaction,
+            pending_transaction,
+        ]
+        result, pending = endpoints.get_transactions_for_address(
+            transactions_processor, accounts_manager, "0xaddress"
+        )
+        assert pending == pending_transaction
+    else:
+        transactions_processor.get_transaction_by_hash.return_value = stored_transaction
+        result = endpoints.get_transaction_by_hash(transactions_processor, "0xabc")
 
     leader_config = result["consensus_data"]["leader_receipt"][0]["node_config"]
     validator_config = result["consensus_data"]["validators"][0]["node_config"]
+    assert len(result["consensus_data"]["leader_receipt"]) == 1
     assert leader_config == {"address": "0xvalidator"}
     assert validator_config == {"address": "0xvalidator2"}
+    assert result["studio_data"] == {
+        "leader_validation_receipt": {
+            "vote": "agree",
+            "node_config": {"address": "0xvalidator"},
+        }
+    }
+    assert len(stored_transaction["consensus_data"]["leader_receipt"]) == 2
+    assert "studio_data" not in stored_transaction
     assert (
         stored_transaction["consensus_data"]["leader_receipt"][0]["node_config"][
             "private_key"
         ]
         == "0xsecret"
+    )
+
+
+@pytest.mark.parametrize(
+    "receipts", [None, [], [{"result": "0x00"}], {"result": "0x00"}]
+)
+def test_eth_get_transaction_by_hash_preserves_single_or_absent_leader_receipt(
+    receipts,
+):
+    transactions_processor = MagicMock()
+    transaction = {"consensus_data": {"leader_receipt": receipts}}
+    transactions_processor.get_transaction_by_hash.return_value = transaction
+
+    assert (
+        endpoints.get_transaction_by_hash(transactions_processor, "0xabc")
+        == transaction
     )
 
 
