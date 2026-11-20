@@ -66,6 +66,32 @@ class TestLlmErc20:
         assert contract.get_balance_of(bob_hex) == 100
 
 
+    def test_transfer_with_reformatted_llm_output(
+        self, direct_vm, direct_deploy, direct_alice, direct_bob
+    ):
+        """Pretty-printed, reordered JSON from the LLM still yields the transfer."""
+        direct_vm.sender = direct_alice
+        alice_hex = _addr_hex(direct_alice)
+        bob_hex = _addr_hex(direct_bob)
+        contract = direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000)
+
+        direct_vm.mock_llm(
+            r".*",
+            "{\n"
+            '  "updated_balances": {\n'
+            f'    "{bob_hex}": 100,\n'
+            f'    "{alice_hex}": 900\n'
+            "  },\n"
+            '  "transaction_error": "",\n'
+            '  "transaction_success": true\n'
+            "}\n",
+        )
+
+        contract.transfer(100, bob_hex)
+        assert contract.get_balance_of(alice_hex) == 900
+        assert contract.get_balance_of(bob_hex) == 100
+
+
 class TestPayableEscrow:
     def test_deploy(self, direct_vm, direct_deploy, direct_alice):
         direct_vm.sender = direct_alice
