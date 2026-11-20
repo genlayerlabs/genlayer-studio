@@ -76,7 +76,6 @@ class TestLlmErc20:
         this. Instead capture what the contract hands to strict_eq for two
         semantically identical answers and require the strings to be equal.
         """
-        import genlayer as gl
         from unittest import mock
 
         direct_vm.sender = direct_alice
@@ -105,8 +104,14 @@ class TestLlmErc20:
             compared.append(value)
             return value
 
-        for answer in (compact, reformatted):
-            contract = direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000)
+        # direct_deploy loads the GenVM SDK; `genlayer` is importable only after
+        # the first deploy, so deploy both contracts before importing it.
+        contracts = [
+            direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000) for _ in range(2)
+        ]
+        import genlayer as gl
+
+        for contract, answer in zip(contracts, (compact, reformatted)):
             with mock.patch.object(
                 gl.nondet, "exec_prompt", return_value=answer
             ), mock.patch.object(gl.eq_principle, "strict_eq", capture_strict_eq):
