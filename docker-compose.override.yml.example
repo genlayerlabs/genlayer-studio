@@ -5,13 +5,13 @@
 # (e.g., a local Anvil/Hardhat node, or other development services).
 #
 # USAGE:
-#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   cp docker-compose.override.yml.example compose.override.yaml
 #   docker compose up -d
 #
 # SECURITY WARNING:
 #   This override allows containers to access your host machine's network.
 #   DO NOT use in production environments.
-#   DO NOT commit docker-compose.override.yml to version control.
+#   DO NOT commit compose.override.yaml to version control.
 
 services:
   jsonrpc:

@@ -206,7 +206,7 @@ Database: PostgreSQL (shared by all workers and RPC instances)
     - `JSONRPC_REPLICAS` (default: 1) - Number of RPC instances (minimum: 1).
   - Workers: `WORKER_ID`, `WORKER_POLL_INTERVAL`, `TRANSACTION_TIMEOUT_MINUTES`.
 - Commands (see repo guidelines):
-  - Full stack: `touch .env && docker compose --env-file .env.default --env-file .env up` (add `-d` for background).
+  - Full stack: `docker compose up` (defaults in `.env.default`; optional overrides in `.env`) (add `-d` for background).
   - Backend services only: `docker compose up jsonrpc webrequest ollama database-migration postgres`.
   - Frontend dev: `cd frontend && npm install && npm run dev`.
   - Python tests: `pytest` (use `-k`/`-m` for filters).
@@ -248,7 +248,7 @@ Database: PostgreSQL (shared by all workers and RPC instances)
 - `eth_call` issues: validate calldata encoding, readonly path, and StateProxy access; inspect GenVM logs in `ExecutionResult`.
 - Event delivery: ensure Redis subscriber connected; check Redis logs and channel subscriptions.
 - **Startup failures**:
-  - "REDIS_URL environment variable is required" → Set `REDIS_URL` in `.env` (overrides) or `.env.default` (e.g., `redis://redis:6379/0`).
+  - "REDIS_URL environment variable is required" → Set `REDIS_URL` in `.env` (overrides) (e.g., `redis://redis:6379/0`).
   - "Failed to connect to Redis" → Verify Redis service is running: `docker compose ps redis` and check health.
   - No transactions processing → Check worker logs: `docker compose logs consensus-worker`.
 

@@ -1,0 +1,10 @@
+# Default Compose entry point (`docker compose up`).
+# Layers the configuration for ${VAR} interpolation: `.env.default` (tracked
+# defaults) first, then the project-level `.env` (your overrides, optional),
+# which Compose loads automatically and which wins. Compose warns that both this
+# file and docker-compose.yml exist; compose.yaml is the one it uses.
+# CI keeps using `-f docker-compose.yml` directly with a copy of `.env.default`.
+include:
+  - path: docker-compose.yml
+    env_file:
+      - .env.default

@@ -95,7 +95,7 @@ Intelligent contracts are Python classes inheriting from `gl.Contract`:
 - API client: `frontend/src/services/api.ts`
 
 ### Environment Configuration
-Key environment variables (defaults in `.env.default`; override in `.env`):
+Key environment variables (see `.env.example`):
 - `POSTGRES_*`: Database connection
 - `PROVIDERS_*`: LLM provider API keys
 - `DEFAULT_VALIDATORS_COUNT`: Consensus participants

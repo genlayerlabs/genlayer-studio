@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Copy .env file
-        run: cp .env.default .env
+        run: cp .env.example .env
 
       - name: Resolve GenVM binding
         env:
@@ -308,7 +308,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Copy .env file
-        run: cp .env.default .env
+        run: cp .env.example .env
 
       - name: Resolve GenVM binding
         env:

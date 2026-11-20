@@ -4,23 +4,7 @@ require("hardhat-deploy");
 const fs = require("node:fs");
 const path = require("node:path");
 
-function readDotenvVariable(key) {
-  // `.env` (user overrides) wins over `.env.default`.
-  for (const name of [".env", ".env.default"]) {
-    try {
-      const dotenvPath = path.resolve(__dirname, "..", name);
-      const contents = fs.readFileSync(dotenvPath, "utf8");
-      const match = contents.match(
-        new RegExp(
-          `^\\\\s*${key}\\\\s*=\\\\s*['\\"]?(\\\\d+)['\\"]?\\\\s*(?:#.*)?$`,
-          "m"
-        )
-      );
-      if (match) return match[1];
-    } catch (_) {}
-  }
-  return null;
-}
+const { readDotenvVariable } = require("./read-dotenv");
 
 function getChainId() {
   const raw =

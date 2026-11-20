@@ -64,7 +64,7 @@ jobs:
           oha --version
 
       - name: Copy .env file
-        run: cp .env.default .env
+        run: cp .env.example .env
 
       - name: Resolve GenVM binding
         env:

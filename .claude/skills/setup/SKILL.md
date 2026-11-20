@@ -83,7 +83,7 @@ genlayer down    # Stop all services
 # Find what's using port 8080
 lsof -i :8080
 
-# Or use different ports in .env (overrides on top of .env.default)
+# Or use different ports in .env
 ```
 
 ### Database Connection Issues
