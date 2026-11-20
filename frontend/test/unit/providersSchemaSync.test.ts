@@ -23,4 +23,19 @@ describe('providers schema sync', () => {
       frontendRule?.then?.properties?.model?.enum,
     );
   });
+
+  it('keeps the pearl provider definition aligned between backend and frontend', () => {
+    expect(backendSchema.properties.provider.examples).toContain('pearl');
+    expect(frontendSchema.properties.provider.examples).toContain('pearl');
+
+    const backendRule = getProviderRule(backendSchema, 'pearl');
+    const frontendRule = getProviderRule(frontendSchema, 'pearl');
+
+    expect(backendRule?.then?.properties?.plugin?.const).toBe(
+      'openai-compatible',
+    );
+    expect(frontendRule?.then?.properties?.plugin?.const).toBe(
+      'openai-compatible',
+    );
+  });
 });

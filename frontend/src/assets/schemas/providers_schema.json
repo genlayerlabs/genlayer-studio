@@ -9,6 +9,7 @@
         "ollama",
         "heuristai",
         "chutesai",
+        "pearl",
         "openai",
         "anthropic",
         "xai",
@@ -100,6 +101,22 @@
         "properties": {
           "provider": {
             "const": "chutesai"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "pearl"
           }
         }
       },

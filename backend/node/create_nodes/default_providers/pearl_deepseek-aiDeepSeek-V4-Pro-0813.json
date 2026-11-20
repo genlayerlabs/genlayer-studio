@@ -1,0 +1,10 @@
+{
+  "provider": "pearl",
+  "plugin": "openai-compatible",
+  "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "PEARL_API_KEY",
+    "api_url": "https://inference.pearlresearch.ai"
+  }
+}
