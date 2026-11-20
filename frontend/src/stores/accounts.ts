@@ -56,13 +56,14 @@ export const useAccountsStore = defineStore('accountsStore', () => {
       account.type !== 'local' ||
       funding.value[address]
     )
-      return;
+      return false;
     const network = networkStore.currentNetwork;
     funding.value[address] = true;
     try {
       await rpcClient.fundAccount(address, amountWei);
       if (network === networkStore.currentNetwork)
         await refreshBalance(address);
+      return true;
     } finally {
       delete funding.value[address];
     }

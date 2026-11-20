@@ -25,7 +25,8 @@ async function fund(value: string) {
 
   error.value = '';
   try {
-    await store.fundAccount(props.account, wei.toString());
+    const funded = await store.fundAccount(props.account, wei.toString());
+    if (!funded) return;
     notify({ title: `Funded ${value.trim()} GEN`, type: 'success' });
     amount.value = '';
     shown.value = false;

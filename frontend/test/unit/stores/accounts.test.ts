@@ -88,7 +88,7 @@ describe('useAccountsStore', () => {
     };
     rpc.getBalance.mockResolvedValue('0x7d');
 
-    await accountsStore.fundAccount(account, '25');
+    await expect(accountsStore.fundAccount(account, '25')).resolves.toBe(true);
 
     expect(rpc.fundAccount).toHaveBeenCalledWith(account.address, '25');
     expect(rpc.getBalance).toHaveBeenCalledWith(account.address);
@@ -117,15 +117,16 @@ describe('useAccountsStore', () => {
   });
 
   it('does not call the Studio faucet for external wallets or on testnet', async () => {
-    await accountsStore.fundAccount(
-      { type: 'external', address: testAddress1 },
-      '25',
-    );
+    await expect(
+      accountsStore.fundAccount(
+        { type: 'external', address: testAddress1 },
+        '25',
+      ),
+    ).resolves.toBe(false);
     useNetworkStore().setCurrentNetwork('testnetBradbury');
-    await accountsStore.fundAccount(
-      { type: 'local', address: testAddress1 },
-      '25',
-    );
+    await expect(
+      accountsStore.fundAccount({ type: 'local', address: testAddress1 }, '25'),
+    ).resolves.toBe(false);
     expect(rpc.fundAccount).not.toHaveBeenCalled();
   });
 

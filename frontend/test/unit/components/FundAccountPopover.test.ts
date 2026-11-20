@@ -34,6 +34,7 @@ const mountPopover = () =>
 describe('FundAccountPopover', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.fundAccount.mockResolvedValue(true);
   });
 
   it('funds the target account immediately with a preset amount in decimal wei', async () => {
@@ -61,6 +62,23 @@ describe('FundAccountPopover', () => {
       'Enter a positive amount',
     );
     expect(mocks.fundAccount).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('keeps the amount and skips the success toast when funding is skipped', async () => {
+    mocks.fundAccount.mockResolvedValueOnce(false);
+    const wrapper = mountPopover();
+    const input = wrapper.get('input');
+    await input.setValue('1');
+    await wrapper.get('form').trigger('submit');
+    await flushPromises();
+
+    expect(mocks.fundAccount).toHaveBeenCalledExactlyOnceWith(
+      account,
+      '1000000000000000000',
+    );
+    expect(input.element.value).toBe('1');
+    expect(mocks.notify).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
