@@ -4,12 +4,12 @@ require("hardhat-deploy");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { readDotenvVariable } = require("./read-dotenv");
+const { readChainIdFromDotenv } = require("./read-dotenv");
 
 function getChainId() {
   const raw =
     process.env.GENLAYER_CHAIN_ID ?? process.env.HARDHAT_CHAIN_ID ??
-    readDotenvVariable("GENLAYER_CHAIN_ID") ?? readDotenvVariable("HARDHAT_CHAIN_ID") ?? "61127";
+    readChainIdFromDotenv() ?? "61127";
   const chainId = Number.parseInt(raw, 10);
   if (Number.isNaN(chainId)) {
     throw new Error(

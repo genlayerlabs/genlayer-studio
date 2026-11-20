@@ -31,8 +31,8 @@ def _expand(value: str, lookup: dict[str, str], seen: tuple[str, ...] = ()) -> s
     return _REFERENCE.sub(replace, value)
 
 
-def load_env(root: Path | None = None, override: bool = False) -> None:
-    """Load `.env.default` then `.env` from `root`; os.environ wins unless `override`."""
+def load_env(root: Path | None = None) -> None:
+    """Load `.env.default` then `.env` from `root`; os.environ wins."""
     root = root or ROOT_DIR
     merged: dict[str, str] = {}
     for name in (".env.default", ".env"):
@@ -43,8 +43,7 @@ def load_env(root: Path | None = None, override: bool = False) -> None:
                     merged[key] = value
 
     lookup = dict(merged)
-    if not override:
-        lookup.update(os.environ)
+    lookup.update(os.environ)
     for key, value in merged.items():
-        if override or key not in os.environ:
+        if key not in os.environ:
             os.environ[key] = _expand(value, lookup)

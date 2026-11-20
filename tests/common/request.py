@@ -4,7 +4,7 @@ import eth_utils
 import json
 import requests
 import time
-from backend.env_loader import load_env
+from dotenv import load_dotenv
 from eth_account import Account
 from eth_abi import encode
 from web3 import Web3
@@ -13,7 +13,7 @@ from tests.common.transactions import sign_transaction
 
 import backend.node.genvm.origin.calldata as calldata
 
-load_env()
+load_dotenv()
 
 ZERO_ADDRESS = "0x" + "0" * 40
 

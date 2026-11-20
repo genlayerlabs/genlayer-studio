@@ -3,7 +3,9 @@
 # defaults) first, then the project-level `.env` (your overrides, optional),
 # which Compose loads automatically and which wins. Compose warns that both this
 # file and docker-compose.yml exist; compose.yaml is the one it uses.
-# CI keeps using `-f docker-compose.yml` directly with a copy of `.env.default`.
+# Explicit `-f docker-compose.yml ...` callers (CI, scripts) bypass this file: they must
+# provide the defaults themselves, as CI does by copying `.env.example` (a mirror of
+# `.env.default`) to `.env`, or pass `--env-file .env.default --env-file .env`.
 include:
   - path: docker-compose.yml
     env_file:

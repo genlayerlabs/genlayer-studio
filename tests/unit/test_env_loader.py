@@ -26,13 +26,6 @@ def test_missing_env_file_is_fine(tmp_path, monkeypatch):
     assert os.environ["ONLY_DEFAULT"] == "1"
 
 
-def test_override_flag_replaces_process_env(tmp_path, monkeypatch):
-    (tmp_path / ".env.default").write_text("D=file\n")
-    monkeypatch.setenv("D", "process")
-
-    load_env(tmp_path, override=True)
-
-    assert os.environ["D"] == "file"
 
 
 def test_repository_defaults_file_exists():
@@ -74,8 +67,7 @@ def test_env_example_matches_env_default():
     ).read_text()
 
 
-def test_hardhat_reads_chain_id_from_env_then_default(tmp_path):
-    import json
+def _hardhat_chain_id(root, env=None):
     import shutil
     import subprocess
 
@@ -84,19 +76,37 @@ def test_hardhat_reads_chain_id_from_env_then_default(tmp_path):
         import pytest
 
         pytest.skip("node is not installed")
-
-    (tmp_path / ".env.default").write_text("GENLAYER_CHAIN_ID='61127'\nHARDHAT_CHAIN_ID=\"7001\"\n")
-    (tmp_path / ".env").write_text("GENLAYER_CHAIN_ID=61234  # override\n")
-    script = (
-        "const {readDotenvVariable: r} = require(process.argv[1]);"
-        "console.log(JSON.stringify([r('GENLAYER_CHAIN_ID', process.argv[2]),"
-        "r('HARDHAT_CHAIN_ID', process.argv[2]), r('NOPE', process.argv[2])]));"
-    )
     out = subprocess.run(
-        [node, "-e", script, str(ROOT_DIR / "hardhat" / "read-dotenv.js"), str(tmp_path)],
+        [
+            node,
+            "-e",
+            "const {readChainIdFromDotenv: r} = require(process.argv[1]);"
+            "console.log(JSON.stringify(r(process.argv[2])));",
+            str(ROOT_DIR / "hardhat" / "read-dotenv.js"),
+            str(root),
+        ],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    # override wins for the key in both files; default is used for the other
-    assert json.loads(out) == ["61234", "7001", None]
+    import json
+
+    return json.loads(out)
+
+
+def test_hardhat_layer_beats_key_priority(tmp_path):
+    (tmp_path / ".env.default").write_text("GENLAYER_CHAIN_ID='61127'\n")
+    (tmp_path / ".env").write_text("HARDHAT_CHAIN_ID=61234  # override\n")
+    assert _hardhat_chain_id(tmp_path) == "61234"
+
+
+def test_hardhat_key_priority_within_layer(tmp_path):
+    (tmp_path / ".env").write_text("HARDHAT_CHAIN_ID=7001\nGENLAYER_CHAIN_ID=\"7002\"\n")
+    assert _hardhat_chain_id(tmp_path) == "7002"
+
+
+def test_hardhat_falls_back_to_default_layer(tmp_path):
+    (tmp_path / ".env.default").write_text("GENLAYER_CHAIN_ID='61127'\n")
+    (tmp_path / ".env").write_text("OTHER=1\n")
+    assert _hardhat_chain_id(tmp_path) == "61127"
+    assert _hardhat_chain_id(tmp_path / "missing") is None

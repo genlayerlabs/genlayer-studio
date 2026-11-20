@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("TEST_WITH_MOCK_LLMS", "true")
 
-from backend.env_loader import load_env
+from dotenv import load_dotenv
 
-load_env()
+if not load_dotenv():
+    load_dotenv(".env.example")

@@ -1,6 +1,6 @@
 import pytest
 import os
-from backend.env_loader import load_env
+from dotenv import load_dotenv
 from typing import Any
 
 from tests.common.request import payload, post_request_localhost
@@ -139,7 +139,7 @@ def mock_llms() -> bool:
 
 
 def pytest_configure(config: Any) -> None:
-    load_env(override=True)
+    load_dotenv(override=True)
 
 
 def pytest_collection_modifyitems(config: Any, items: list) -> None:
