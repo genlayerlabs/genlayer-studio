@@ -156,3 +156,45 @@ def test_compose_explicit_env_files_resolve_cross_file_references(tmp_path):
     (tmp_path / ".env").write_text("HOSTPORT=${DEBUGPORT}\n")
     out = _compose_config(tmp_path, "--env-file", ".env.default", "--env-file", ".env")
     assert 'published: "4678"' in out
+
+
+def test_ci_compose_entry_point_gets_every_tracked_default(tmp_path):
+    """CI copies `.env.example` to `.env` and calls `-f docker-compose.yml`."""
+    import re
+    import shutil
+    import subprocess
+
+    import pytest
+    from dotenv import dotenv_values
+
+    if shutil.which("docker-compose"):
+        compose = ["docker-compose"]
+    elif shutil.which("docker"):
+        compose = ["docker", "compose"]
+    else:
+        pytest.skip("docker compose is not installed")
+
+    for name in ("docker-compose.yml", "docker-compose.ci.yml"):
+        shutil.copy(ROOT_DIR / name, tmp_path / name)
+    shutil.copytree(ROOT_DIR / "docker", tmp_path / "docker")
+    shutil.copy(ROOT_DIR / ".env.default", tmp_path / ".env.default")
+    shutil.copy(ROOT_DIR / ".env.example", tmp_path / ".env")
+
+    result = subprocess.run(
+        [
+            *compose,
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.ci.yml",
+            "config",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    tracked = set(dotenv_values(ROOT_DIR / ".env.default"))
+    unset = set(re.findall(r'The \\?"(\w+)\\?" variable is not set', result.stderr))
+    assert unset.isdisjoint(tracked), unset & tracked
