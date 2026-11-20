@@ -1,10 +1,13 @@
 import { type CalldataEncodable } from 'genlayer-js/types';
 import { parse as calldataParse } from '@/calldata/parser';
+import { formatCalldataParseError } from '@/calldata/errors';
 import { AnyFieldValue } from '../global/fields/AnyFieldValue';
 
 export interface SingleArgData {
   val: CalldataEncodable | AnyFieldValue;
   key: number | string;
+  /** Parameter name, used in error messages */
+  name?: string;
 }
 
 export interface ArgData {
@@ -21,7 +24,10 @@ export function unfoldArgsData(args: ArgData): {
       try {
         return calldataParse(x.val.value);
       } catch (e) {
-        throw new Error(`failed to parse ${x.key}`);
+        const label = x.name ?? String(x.key);
+        throw new Error(
+          `Invalid value for parameter "${label}": ${formatCalldataParseError(e)}`,
+        );
       }
     }
     return x.val;

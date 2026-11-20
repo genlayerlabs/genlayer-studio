@@ -395,11 +395,12 @@ export function useContractQueries() {
       transactionsStore.addTransaction(tx);
       contractsStore.removeDeployedContract(contract.value?.id ?? '');
       return tx;
-    } catch (error) {
+    } catch (error: any) {
       isDeploying.value = false;
       notify({
         type: 'error',
         title: 'Error deploying contract',
+        text: error?.details || error?.message || undefined,
       });
       console.error('Error Deploying the contract', error);
       if (error instanceof Error) {
@@ -460,9 +461,11 @@ export function useContractQueries() {
       });
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      throw new Error('Error getting the contract state');
+      throw new Error(
+        error?.details || error?.message || 'Error getting the contract state',
+      );
     }
   }
 
@@ -525,12 +528,14 @@ export function useContractQueries() {
         },
       });
       return true;
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      if (error instanceof Error) {
+      if (!error?.details && error instanceof Error) {
         throw error;
       }
-      throw new Error('Error writing to contract');
+      throw new Error(
+        error?.details || error?.message || 'Error writing to contract',
+      );
     }
   }
 
