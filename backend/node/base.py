@@ -876,7 +876,6 @@ class Node:
             from_address,
             calldata,
             readonly=False,
-            is_init=True,
             transaction_hash=transaction_hash,
             transaction_datetime=transaction_datetime,
             code=code_to_deploy,
@@ -899,7 +898,6 @@ class Node:
             from_address,
             calldata,
             readonly=False,
-            is_init=False,
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
             value=value,
@@ -919,7 +917,6 @@ class Node:
             from_address,
             calldata,
             readonly=True,
-            is_init=False,
             is_sync=True,
             transaction_datetime=(
                 transaction_datetime
@@ -976,7 +973,6 @@ class Node:
         executor_selector = genvm_executor_selector or inferred_selector
         NO_ADDR = Address(b"\x00" * 20)
         message = {
-            "is_init": False,
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
@@ -1042,7 +1038,6 @@ class Node:
         calldata: bytes,
         *,
         readonly: bool,
-        is_init: bool,
         is_sync: bool = False,
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
@@ -1102,7 +1097,6 @@ class Node:
 
         logger = self.logger.with_keys({"tx_id": host_data["tx_id"]})
         message = {
-            "is_init": is_init,
             "contract_address": contract_address,
             "sender_address": Address(from_address),
             "origin_address": Address(origin_address or from_address),

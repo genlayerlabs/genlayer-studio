@@ -228,7 +228,8 @@ async def test_a_failed_attempt_is_torn_down_before_the_backoff(monkeypatch):
         ),
         timeout=0.1,
         is_sync=False,
-        message={"is_init": True},
+        message={},
+        code=b"",
     )
 
     assert events.index("closed") < events.index("backoff")
