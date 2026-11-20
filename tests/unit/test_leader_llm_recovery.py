@@ -93,7 +93,6 @@ async def _run_genvm(node: Node):
         from_address="0x000000000000000000000000000000000000dead",
         calldata=b"\x00",
         readonly=False,
-        is_init=False,
         transaction_hash="0xtx",
         transaction_datetime=None,
     )

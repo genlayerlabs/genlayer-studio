@@ -302,7 +302,8 @@ class TestRetryBehavior:
                 manager_client=client,
                 ctx=ctx,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 host="unix://test",
                 calldata=b"",
                 bucket_totals=origin_base_host.default_bucket_totals(3),
@@ -335,7 +336,8 @@ class TestRetryBehavior:
                 manager_client=client,
                 ctx=ctx,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 host="unix://test",
                 calldata=b"",
                 bucket_totals=origin_base_host.default_bucket_totals(3),
@@ -363,7 +365,8 @@ class TestRetryBehavior:
                 manager_client=client,
                 ctx=ctx,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 host="unix://test",
                 calldata=b"",
                 bucket_totals=origin_base_host.default_bucket_totals(3),
@@ -408,7 +411,8 @@ class TestRetryBehavior:
                 host_supplier,
                 timeout=15,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 capture_output=False,
             )
 
@@ -450,7 +454,8 @@ class TestRetryBehavior:
                     host_supplier,
                     timeout=15,
                     is_sync=False,
-                    message={"is_init": True},
+                    message={},
+                    code=b"",
                     capture_output=False,
                 )
 
@@ -493,7 +498,8 @@ class TestRetryBehavior:
                     host_supplier,
                     timeout=15,
                     is_sync=False,
-                    message={"is_init": True},
+                    message={},
+                    code=b"",
                     capture_output=False,
                 )
 
@@ -527,7 +533,8 @@ class TestRetryBehavior:
                 manager_client=_FailedToStartManagerClient(error),
                 ctx=ctx,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 host="unix://test",
                 calldata=b"",
                 bucket_totals=origin_base_host.default_bucket_totals(3),
@@ -570,7 +577,8 @@ class TestRetryBehavior:
                 host_supplier,
                 timeout=0.3,
                 is_sync=False,
-                message={"is_init": True},
+                message={},
+                code=b"",
                 capture_output=False,
             )
 

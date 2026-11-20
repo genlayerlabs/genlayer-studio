@@ -86,9 +86,7 @@ async def _run(monkeypatch, host: Host, message, **kwargs) -> _FakeManagerClient
 @pytest.mark.asyncio
 async def test_call_declares_the_deployed_major(monkeypatch):
     state = _RecordingStateProxy(bytes([2]))
-    client = await _run(
-        monkeypatch, _host(state), {"is_init": False, "contract_address": ADDR}
-    )
+    client = await _run(monkeypatch, _host(state), {"contract_address": ADDR})
 
     assert client.payloads[0]["selector"] == {"kind": "major", "major": 2}
     assert state.reads == [(ADDR, b"\x00" * 32, 0, 1)]
@@ -97,9 +95,7 @@ async def test_call_declares_the_deployed_major(monkeypatch):
 @pytest.mark.asyncio
 async def test_deploy_declares_the_undeployed_major(monkeypatch):
     state = _RecordingStateProxy(bytes([2]))
-    client = await _run(
-        monkeypatch, _host(state), {"is_init": True, "contract_address": ADDR}
-    )
+    client = await _run(monkeypatch, _host(state), {"contract_address": ADDR}, code=b"")
 
     assert client.payloads[0]["selector"] == {
         "kind": "major",
@@ -115,7 +111,7 @@ async def test_an_explicit_major_skips_the_storage_read(monkeypatch):
     client = await _run(
         monkeypatch,
         _host(state),
-        {"is_init": False, "contract_address": ADDR},
+        {"contract_address": ADDR},
         major=6,
     )
 
@@ -181,7 +177,7 @@ async def test_run_genvm_host_opts_into_cross_contract_resolution(monkeypatch):
             ),
             timeout=5,
             is_sync=False,
-            message={"is_init": False, "contract_address": ADDR},
+            message={"contract_address": ADDR},
         )
 
     assert captured["request_extra"]["hook_cross_contract_calls"] is True
