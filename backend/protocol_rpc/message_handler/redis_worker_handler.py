@@ -13,6 +13,7 @@ from loguru import logger
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import EventScope, LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
+from backend.consensus.worker_control import WORKER_CONTROL_CHANNEL
 
 
 class RedisWorkerMessageHandler(MessageHandler):
@@ -53,6 +54,7 @@ class RedisWorkerMessageHandler(MessageHandler):
         )
         self.redis_client: Optional[aioredis.Redis] = None
         self._listener_task: Optional[asyncio.Task] = None
+        self._control_listener_task: Optional[asyncio.Task] = None
 
         logger.info(f"Worker {self.worker_id} initialized with Redis pub/sub")
 
@@ -80,24 +82,40 @@ class RedisWorkerMessageHandler(MessageHandler):
         Args:
             callback: Async function to call when validator event received
         """
+        self._listener_task = await self._start_listener(
+            self.VALIDATOR_CHANNEL, callback, "validator"
+        )
+
+    async def subscribe_to_worker_control_events(self, callback):
+        """
+        Subscribe to worker control events (pause/resume around snapshot restore).
+
+        Args:
+            callback: Async function to call when a control event is received
+        """
+        self._control_listener_task = await self._start_listener(
+            WORKER_CONTROL_CHANNEL, callback, "worker control"
+        )
+
+    async def _start_listener(
+        self, channel: str, callback, label: str
+    ) -> Optional[asyncio.Task]:
         if not self.redis_client:
             await self.initialize()
 
         if not self.redis_client:
             logger.error(
-                "Cannot subscribe to validator events: Redis client not initialized"
+                f"Cannot subscribe to {label} events: Redis client not initialized"
             )
-            return
+            return None
 
         redis_client = self.redis_client
 
         async def listener():
-            """Listen for validator events and call callback."""
+            """Listen for events on the channel and call callback."""
             redis_pubsub = redis_client.pubsub()
-            await redis_pubsub.subscribe(self.VALIDATOR_CHANNEL)
-            logger.info(
-                f"Worker {self.worker_id} subscribed to {self.VALIDATOR_CHANNEL}"
-            )
+            await redis_pubsub.subscribe(channel)
+            logger.info(f"Worker {self.worker_id} subscribed to {channel}")
 
             try:
                 async for message in redis_pubsub.listen():
@@ -106,16 +124,14 @@ class RedisWorkerMessageHandler(MessageHandler):
                             event_data = json.loads(message["data"])
                             await callback(event_data)
                         except Exception as e:
-                            logger.error(f"Error processing validator event: {e}")
+                            logger.error(f"Error processing {label} event: {e}")
             except asyncio.CancelledError:
-                logger.info(
-                    f"Worker {self.worker_id} validator event listener cancelled"
-                )
-                await redis_pubsub.unsubscribe(self.VALIDATOR_CHANNEL)
+                logger.info(f"Worker {self.worker_id} {label} event listener cancelled")
+                await redis_pubsub.unsubscribe(channel)
                 await redis_pubsub.close()
 
-        # Start listener in background and store reference for cleanup
-        self._listener_task = asyncio.create_task(listener())
+        # Start listener in background; caller stores the reference for cleanup
+        return asyncio.create_task(listener())
 
     def _get_channel_for_event(self, log_event: LogEvent) -> str:
         """
@@ -235,14 +251,16 @@ class RedisWorkerMessageHandler(MessageHandler):
 
     async def close(self):
         """Clean up resources."""
-        # Cancel listener task first
-        if self._listener_task is not None and not self._listener_task.done():
-            self._listener_task.cancel()
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
-            self._listener_task = None
+        # Cancel listener tasks first
+        for task in (self._listener_task, self._control_listener_task):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._listener_task = None
+        self._control_listener_task = None
 
         if self.redis_client:
             await self.redis_client.close()
