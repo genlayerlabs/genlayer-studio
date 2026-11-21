@@ -65,6 +65,60 @@ class TestLlmErc20:
         assert contract.get_balance_of(alice_hex) == 900
         assert contract.get_balance_of(bob_hex) == 100
 
+    def test_strict_eq_input_ignores_llm_formatting(
+        self, direct_vm, direct_deploy, direct_alice, direct_bob
+    ):
+        """The value validators compare under strict_eq must not depend on
+        whitespace or key order in the LLM answer (DEVOPS-134).
+
+        Direct mode only runs the leader, so the final balances cannot show
+        this. Instead capture what the contract hands to strict_eq for two
+        semantically identical answers and require the strings to be equal.
+        """
+        from unittest import mock
+
+        direct_vm.sender = direct_alice
+        alice_hex = _addr_hex(direct_alice)
+        bob_hex = _addr_hex(direct_bob)
+
+        compact = (
+            '{"transaction_success": true, "transaction_error": "", '
+            '"updated_balances": {"' + alice_hex + '": 900, "' + bob_hex + '": 100}}'
+        )
+        reformatted = (
+            "```json\n{\n"
+            '  "updated_balances": {\n'
+            f'    "{bob_hex}": 100,\n'
+            f'    "{alice_hex}": 900\n'
+            "  },\n"
+            '  "transaction_error": "",\n'
+            '  "transaction_success": true\n'
+            "}\n```"
+        )
+
+        compared = []
+
+        def capture_strict_eq(fn):
+            value = fn()
+            compared.append(value)
+            return value
+
+        # direct_deploy loads the GenVM SDK; `genlayer` is importable only after
+        # the first deploy, so deploy both contracts before importing it.
+        contracts = [
+            direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000) for _ in range(2)
+        ]
+        import genlayer as gl
+
+        for contract, answer in zip(contracts, (compact, reformatted)):
+            with mock.patch.object(
+                gl.nondet, "exec_prompt", return_value=answer
+            ), mock.patch.object(gl.eq_principle, "strict_eq", capture_strict_eq):
+                contract.transfer(100, bob_hex)
+
+        assert len(compared) == 2
+        assert compared[0] == compared[1]
+
 
 class TestPayableEscrow:
     def test_deploy(self, direct_vm, direct_deploy, direct_alice):

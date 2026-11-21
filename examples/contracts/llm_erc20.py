@@ -54,11 +54,15 @@ The balance of the receiver should have increased by the amount sent.
 The total sum of all balances should remain the same before and after the transaction"""
 
         def get_transfer_result() -> str:
-            return (
+            raw = (
                 gl.nondet.exec_prompt(prompt_input + task)
                 .replace("```json", "")
                 .replace("```", "")
             )
+            # strict_eq compares the returned string byte for byte, and a real
+            # LLM varies indentation and key order between validators even when
+            # the content is identical. Canonicalise so only the content counts.
+            return json.dumps(json.loads(raw), sort_keys=True)
 
         final_result = gl.eq_principle.strict_eq(get_transfer_result)
 
