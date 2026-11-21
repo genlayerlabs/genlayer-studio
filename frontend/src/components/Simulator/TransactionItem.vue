@@ -603,26 +603,48 @@ const reportedMessages = computed<StudioExecutionFeeReportMessage[]>(() => {
   return feeReport.value?.messageReveal?.messages ?? [];
 });
 
-const eqOutputs = computed(() => {
-  const outputs = leaderReceipt.value?.eq_outputs || {};
-  return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
-    const decodedResult = resultToUserFriendlyJson(value);
-    const parsedValue = decodedResult?.payload?.readable ?? value;
-    try {
-      if (typeof parsedValue === 'string') {
-        return {
-          key,
-          value: JSON.parse(parsedValue),
-        };
+function decodeEqOutputs(outputs: unknown) {
+  return Object.entries(asRecord(outputs) || {}).map(
+    ([key, value]: [string, unknown]) => {
+      const decodedResult = resultToUserFriendlyJson(value);
+      const parsedValue = decodedResult?.payload?.readable ?? value;
+      try {
+        if (typeof parsedValue === 'string') {
+          return { key, value: JSON.parse(parsedValue) };
+        }
+      } catch (e) {
+        console.error('Error parsing JSON:', e);
       }
-    } catch (e) {
-      console.error('Error parsing JSON:', e);
-    }
-    return {
-      key,
-      value: parsedValue,
-    };
-  });
+      return { key, value: parsedValue };
+    },
+  );
+}
+
+// One entry per round that produced equivalence principle outputs. A leader
+// rotation starts a new round with a new leader receipt, so every round of the
+// consensus history is listed, not only the current leader receipt.
+const eqOutputRounds = computed(() => {
+  const results = props.transaction?.data?.consensus_history?.consensus_results;
+  const rounds: {
+    label: string;
+    outputs: ReturnType<typeof decodeEqOutputs>;
+  }[] = [];
+  if (Array.isArray(results)) {
+    results.forEach((entry: any, index: number) => {
+      const outputs = decodeEqOutputs(entry?.leader_result?.[0]?.eq_outputs);
+      if (outputs.length > 0) {
+        rounds.push({
+          label: entry?.consensus_round || `Consensus Round ${index + 1}`,
+          outputs,
+        });
+      }
+    });
+  }
+  if (rounds.length === 0) {
+    const outputs = decodeEqOutputs(leaderReceipt.value?.eq_outputs);
+    if (outputs.length > 0) rounds.push({ label: '', outputs });
+  }
+  return rounds;
 });
 
 const shortHash = computed(() => {
@@ -1527,17 +1549,29 @@ const badgeColorClass = computed(() => {
           </div>
         </ModalSection>
 
-        <ModalSection v-if="eqOutputs.length > 0">
+        <ModalSection v-if="eqOutputRounds.length > 0">
           <template #title>Equivalence Principles Output</template>
           <div class="flex flex-col gap-2">
-            <div v-for="(output, index) in eqOutputs" :key="index">
-              <div class="mb-1 text-xs font-medium">
-                Equivalence Principle #{{ output.key }}:
-              </div>
-              <pre
-                class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
-                >{{ output.value }}</pre
+            <div
+              v-for="(round, roundIndex) in eqOutputRounds"
+              :key="roundIndex"
+              data-testid="eq-output-round"
+            >
+              <div
+                v-if="round.label && eqOutputRounds.length > 1"
+                class="mb-1 text-xs font-medium italic"
               >
+                {{ round.label }}
+              </div>
+              <div v-for="(output, index) in round.outputs" :key="index">
+                <div class="mb-1 text-xs font-medium">
+                  Equivalence Principle #{{ output.key }}:
+                </div>
+                <pre
+                  class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+                  >{{ output.value }}</pre
+                >
+              </div>
             </div>
           </div>
         </ModalSection>

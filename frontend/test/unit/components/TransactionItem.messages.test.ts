@@ -147,6 +147,51 @@ describe('TransactionItem messages (triggered transactions)', () => {
     }
   });
 
+  it('shows equivalence principle outputs from every leader rotation round', async () => {
+    const round = (name: string, leader: string) => ({
+      consensus_round: name,
+      status_changes: ['PENDING'],
+      leader_result: [
+        { node_config: { address: '0xabc' }, eq_outputs: { leader } },
+      ],
+    });
+    const wrapper = mountItem({
+      ...parentTransaction,
+      data: {
+        ...parentTransaction.data,
+        consensus_data: { leader_receipt: [{ eq_outputs: { leader: '"c"' } }] },
+        consensus_history: {
+          consensus_results: [
+            round('Leader Rotation', '"first"'),
+            round('Leader Rotation', '"second"'),
+            round('Accepted', '"third"'),
+          ],
+        },
+      },
+    });
+    await wrapper.trigger('click');
+
+    const rounds = wrapper.findAll('[data-testid="eq-output-round"]');
+    expect(rounds).toHaveLength(3);
+    expect(rounds.map((r) => r.find('pre').text())).toEqual([
+      'first',
+      'second',
+      'third',
+    ]);
+  });
+
+  it('falls back to the current leader receipt without history', async () => {
+    const wrapper = mountItem({
+      ...parentTransaction,
+      data: {
+        ...parentTransaction.data,
+        consensus_data: { leader_receipt: [{ eq_outputs: { leader: '"x"' } }] },
+      },
+    });
+    await wrapper.trigger('click');
+    expect(wrapper.findAll('[data-testid="eq-output-round"]')).toHaveLength(1);
+  });
+
   it('lists triggered transactions as links in the details modal', async () => {
     const wrapper = mountItem();
     await wrapper.trigger('click');
