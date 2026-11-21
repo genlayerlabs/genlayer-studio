@@ -111,6 +111,7 @@ const mountList = () =>
 const rowHashes = (w: any) => w.findAll('.font-mono').map((x: any) => x.text());
 
 beforeEach(() => {
+  localStorage.clear();
   getSentTransactions.mockReset();
   getTransaction.mockReset();
   contracts.currentContractId = 'a';
@@ -213,6 +214,71 @@ describe('TransactionsList messages', () => {
     expect(clearTransactionsForContract).toHaveBeenCalledWith('a');
     expect(wrapper.findAll('.group')).toHaveLength(0);
     expect(wrapper.find('.empty').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  // Server-like paging over `total` rows, newest first, limit capped at 100.
+  const serve = (total: number) =>
+    getSentTransactions.mockImplementation(async ({ limit, offset = 0 }) =>
+      Array.from(
+        { length: Math.max(0, Math.min(total - offset, Math.min(limit, 100))) },
+        (_, i) => {
+          const n = offset + i;
+          return rpcRow(
+            `0x${n.toString(16).padStart(64, '0')}`,
+            addrA,
+            new Date(
+              Date.UTC(2026, 10, 1) + (total - n) * 60_000,
+            ).toISOString(),
+          );
+        },
+      ),
+    );
+
+  it('loads older pages by offset beyond 100 rows', async () => {
+    serve(130);
+    const wrapper = mountList();
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(20);
+
+    for (let i = 0; i < 10; i++) {
+      const more = wrapper.find('[data-testid="load-more-messages"]');
+      if (!more.exists()) break;
+      await more.trigger('click');
+      await flushPromises();
+    }
+    expect(wrapper.findAll('.group')).toHaveLength(130);
+    expect(wrapper.find('[data-testid="load-more-messages"]').exists()).toBe(
+      false,
+    );
+    const offsets = getSentTransactions.mock.calls.map((c) => c[0].offset);
+    expect(offsets).toContain(100);
+    expect(getSentTransactions.mock.calls.every((c) => c[0].limit <= 20)).toBe(
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it('clear covers older pages and survives switching contracts', async () => {
+    serve(50);
+    const wrapper = mountList();
+    await flushPromises();
+    await wrapper.find('.clear').trigger('click');
+    await wrapper.find('.ok').trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0);
+
+    // Older messages stay hidden after Load more...
+    await wrapper.find('[data-testid="load-more-messages"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0);
+
+    // ...and after switching away and back.
+    contracts.currentContractId = 'b';
+    await flushPromises();
+    contracts.currentContractId = 'a';
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0);
     wrapper.unmount();
   });
 });

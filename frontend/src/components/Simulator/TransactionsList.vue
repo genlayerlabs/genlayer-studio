@@ -30,13 +30,40 @@ const MESSAGES_PAGE_SIZE = 20;
 // from the Studio backend; full details are fetched when a row is opened.
 // Rows are keyed by the contract address they were fetched for, so a row of
 // another contract is never shown.
+// `newest` is the polled first page; `older` are pages appended with
+// "Load more" (by offset, each bounded by the page size).
 const messagesState = ref<{
   address: string;
-  items: TransactionItemType[];
+  newest: TransactionItemType[];
+  older: TransactionItemType[];
+  hasMore: boolean;
 } | null>(null);
-const messagesLimit = ref(MESSAGES_PAGE_SIZE);
+const loadingMore = ref(false);
 const messageDetails = ref<Record<string, any>>({});
-const dismissedMessages = ref<Set<string>>(new Set());
+
+// Clear Transactions hides every message of a contract created up to the
+// newest one listed at that moment (also the older, not yet loaded pages).
+// The cutoff is kept per contract address in localStorage.
+const CLEARED_STORAGE_KEY = 'transactionsList.clearedMessagesBefore';
+function readCutoffs(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(CLEARED_STORAGE_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+const clearedCutoffs = ref<Record<string, number>>(readCutoffs());
+function setCutoff(address: string, cutoff: number) {
+  clearedCutoffs.value = { ...clearedCutoffs.value, [address]: cutoff };
+  try {
+    localStorage.setItem(
+      CLEARED_STORAGE_KEY,
+      JSON.stringify(clearedCutoffs.value),
+    );
+  } catch {
+    // Storage unavailable: the cutoff lasts for this session only.
+  }
+}
 
 const currentAddress = computed(() => {
   const id = contractsStore.currentContractId;
@@ -48,8 +75,15 @@ const currentAddress = computed(() => {
 const messages = computed<TransactionItemType[]>(() => {
   const state = messagesState.value;
   if (!state || state.address !== currentAddress.value) return [];
-  return state.items
-    .filter((m) => !dismissedMessages.value.has(m.hash))
+  const cutoff = clearedCutoffs.value[state.address] ?? -Infinity;
+  const seen = new Set<string>();
+  return [...state.newest, ...state.older]
+    .filter((m) => {
+      // A new message may shift pages, so the same hash can appear twice.
+      if (seen.has(m.hash)) return false;
+      seen.add(m.hash);
+      return new Date(m.data?.created_at).getTime() > cutoff;
+    })
     .map((m) => {
       const details = messageDetails.value[m.hash];
       return details ? { ...m, data: { ...m.data, ...details } } : m;
@@ -58,11 +92,44 @@ const messages = computed<TransactionItemType[]>(() => {
 
 const canLoadMore = computed(() => {
   const state = messagesState.value;
-  return (
-    state?.address === currentAddress.value &&
-    state?.items.length === messagesLimit.value
-  );
+  return state?.address === currentAddress.value && state.hasMore;
 });
+
+async function loadMoreMessages() {
+  const state = messagesState.value;
+  const address = currentAddress.value;
+  if (!state || state.address !== address || !address || loadingMore.value) {
+    return;
+  }
+  const gen = generation;
+  loadingMore.value = true;
+  try {
+    const result = await rpcClient.getSentTransactions({
+      address,
+      limit: MESSAGES_PAGE_SIZE,
+      offset: state.newest.length + state.older.length,
+    });
+    if (gen !== generation || messagesState.value !== state) return;
+    const page = toItems(result);
+    messagesState.value = {
+      ...state,
+      older: [...state.older, ...page],
+      hasMore: page.length === MESSAGES_PAGE_SIZE,
+    };
+  } catch (e) {
+    console.warn('Error loading more sent transactions', e);
+  } finally {
+    loadingMore.value = false;
+  }
+}
+
+function toItems(result: any[] | undefined) {
+  return (result ?? [])
+    .filter((tx: any) => tx?.hash)
+    .map((tx: any) =>
+      toSentTransactionItem(tx, contractsStore.currentContractId ?? ''),
+    );
+}
 
 async function loadMessageDetails(hash: string) {
   try {
@@ -104,15 +171,20 @@ async function refreshMessages(gen: number, address: string) {
   try {
     const result = await rpcClient.getSentTransactions({
       address,
-      limit: messagesLimit.value,
+      limit: MESSAGES_PAGE_SIZE,
     });
     if (gen !== generation) return;
-    const items = (result ?? [])
-      .filter((tx: any) => tx?.hash)
-      .map((tx: any) =>
-        toSentTransactionItem(tx, contractsStore.currentContractId ?? ''),
-      );
-    messagesState.value = { address, items };
+    const items = toItems(result);
+    const previous = messagesState.value;
+    messagesState.value = {
+      address,
+      newest: items,
+      older: previous?.address === address ? previous.older : [],
+      hasMore:
+        previous?.address === address && previous.older.length > 0
+          ? previous.hasMore
+          : items.length === MESSAGES_PAGE_SIZE,
+    };
     // Refresh details of rows already opened when their status moved on.
     for (const item of items) {
       const details = messageDetails.value[item.hash];
@@ -149,14 +221,11 @@ watch(
   () => [currentAddress.value, networkStore.isStudio] as const,
   () => {
     messagesState.value = null;
-    messagesLimit.value = MESSAGES_PAGE_SIZE;
     messageDetails.value = {};
-    dismissedMessages.value = new Set();
     startMessages();
   },
   { immediate: true },
 );
-watch(messagesLimit, startMessages);
 onBeforeUnmount(stopMessages);
 
 const transactions = computed(() => {
@@ -182,11 +251,12 @@ const handleClearTransactions = () => {
   transactionsStore.clearTransactionsForContract(
     contractsStore.currentContractId ?? '',
   );
-  // Messages are not stored locally: hide the ones currently listed.
-  dismissedMessages.value = new Set([
-    ...dismissedMessages.value,
-    ...messages.value.map((m) => m.hash),
-  ]);
+  // Messages are not stored locally: hide everything up to the newest one.
+  const address = currentAddress.value;
+  const newest = Math.max(
+    ...messages.value.map((m) => new Date(m.data?.created_at).getTime()),
+  );
+  if (address && Number.isFinite(newest)) setCutoff(address, newest);
 
   isClearTransactionsModalOpen.value = false;
 };
@@ -220,7 +290,8 @@ const handleClearTransactions = () => {
         v-if="canLoadMore"
         class="py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400"
         data-testid="load-more-messages"
-        @click="messagesLimit += MESSAGES_PAGE_SIZE"
+        :disabled="loadingMore"
+        @click="loadMoreMessages"
       >
         Load more sent transactions
       </button>
@@ -240,8 +311,8 @@ const handleClearTransactions = () => {
       <template #title>Clear Transaction List</template>
       <template #description
         >Are you sure you want to clear all transactions? Transactions sent by
-        this contract are hidden from the list until new ones are
-        sent.</template
+        this contract so far (including older ones not loaded yet) are hidden
+        permanently; only newer ones will appear.</template
       >
     </ConfirmationModal>
   </PageSection>
