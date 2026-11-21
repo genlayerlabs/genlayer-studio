@@ -5,6 +5,7 @@ import random
 import json
 import re
 import time
+from datetime import datetime
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
@@ -3527,6 +3528,42 @@ def get_transactions_for_address(
     return _sanitize_rpc_private_keys(
         [_format_transaction_receipts(transaction) for transaction in transactions]
     )
+
+
+MAX_SENT_TRANSACTIONS_PAGE_SIZE = 100
+
+
+def get_sent_transactions_summary(
+    transactions_processor: TransactionsProcessor,
+    accounts_manager: AccountsManager,
+    address: str,
+    limit: int = 20,
+    before_created_at: str | None = None,
+    before_hash: str | None = None,
+) -> list[dict]:
+    """Lightweight, paginated transactions sent by `address` (no consensus data).
+
+    Pages are keyed by a (created_at, hash) cursor (`before_*`, the last row of
+    the previous page) rather than an offset, so they stay stable while new
+    transactions arrive."""
+    if not accounts_manager.is_valid_address(address):
+        raise InvalidAddressError(address)
+    limit = max(1, min(int(limit), MAX_SENT_TRANSACTIONS_PAGE_SIZE))
+    before = None
+    if before_created_at is not None or before_hash is not None:
+        try:
+            before = (datetime.fromisoformat(before_created_at), str(before_hash))
+        except (TypeError, ValueError):
+            raise JSONRPCError(
+                code=-32602,
+                message="before_created_at and before_hash must be given together",
+            )
+        if before_hash is None:
+            raise JSONRPCError(
+                code=-32602,
+                message="before_created_at and before_hash must be given together",
+            )
+    return transactions_processor.get_sent_transactions_summary(address, limit, before)
 
 
 @check_forbidden_method_in_hosted_studio

@@ -64,6 +64,7 @@ CHEAP_READ_METHODS = frozenset(
         "gen_getTransactionStatusDetails",
         "gen_getStudioTransactionByHash",
         "sim_getTransactionsForAddress",
+        "sim_getSentTransactions",
     }
 )
 

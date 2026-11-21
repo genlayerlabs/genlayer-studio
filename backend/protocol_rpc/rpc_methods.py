@@ -293,6 +293,25 @@ def get_transactions_for_address(
     )
 
 
+@rpc.method("sim_getSentTransactions", log_policy=LogPolicy.debug())
+def get_sent_transactions(
+    address: str,
+    limit: int = 20,
+    before_created_at: str | None = None,
+    before_hash: str | None = None,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+    accounts_manager: AccountsManager = Depends(get_accounts_manager),
+) -> list[dict]:
+    return impl.get_sent_transactions_summary(
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        address=address,
+        limit=limit,
+        before_created_at=before_created_at,
+        before_hash=before_hash,
+    )
+
+
 @rpc.method("sim_setFinalityWindowTime", log_policy=LogPolicy.debug())
 def set_finality_window_time(
     seconds: int,

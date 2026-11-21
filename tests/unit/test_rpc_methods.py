@@ -409,3 +409,59 @@ async def test_update_validator_forwards_config_argument(monkeypatch):
         plugin="openai-compatible",
         plugin_config=plugin_config,
     )
+
+
+def test_sent_transactions_summary_is_paginated_and_clamped():
+    processor = MagicMock()
+    processor.get_sent_transactions_summary.return_value = [{"hash": "0x1"}]
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = True
+
+    result = endpoints.get_sent_transactions_summary(
+        processor, accounts, "0xaddress", limit=10_000
+    )
+
+    assert result == [{"hash": "0x1"}]
+    processor.get_sent_transactions_summary.assert_called_once_with(
+        "0xaddress", endpoints.MAX_SENT_TRANSACTIONS_PAGE_SIZE, None
+    )
+
+
+def test_sent_transactions_summary_passes_cursor_and_rejects_partial_cursor():
+    processor = MagicMock()
+    processor.get_sent_transactions_summary.return_value = []
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = True
+
+    endpoints.get_sent_transactions_summary(
+        processor,
+        accounts,
+        "0xaddress",
+        limit=5,
+        before_created_at="2026-11-18T10:00:00.123456",
+        before_hash="0xabc",
+    )
+    (_, limit, before), _ = processor.get_sent_transactions_summary.call_args
+    assert limit == 5
+    assert before[0].isoformat() == "2026-11-18T10:00:00.123456"
+    assert before[1] == "0xabc"
+
+    with pytest.raises(JSONRPCError):
+        endpoints.get_sent_transactions_summary(
+            processor, accounts, "0xaddress", before_created_at="2026-11-18T10:00:00"
+        )
+    with pytest.raises(JSONRPCError):
+        endpoints.get_sent_transactions_summary(
+            processor,
+            accounts,
+            "0xaddress",
+            before_created_at="nope",
+            before_hash="0x1",
+        )
+
+
+def test_sent_transactions_summary_rejects_invalid_address():
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = False
+    with pytest.raises(Exception):
+        endpoints.get_sent_transactions_summary(MagicMock(), accounts, "nope")

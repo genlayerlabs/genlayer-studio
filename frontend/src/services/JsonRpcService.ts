@@ -130,6 +130,32 @@ export class JsonRpcService implements IJsonRpcService {
     );
   }
 
+  // Status name only (no transaction body): for background refreshes.
+  async getTransactionStatus({ hash }: { hash: string }): Promise<string> {
+    return this.callRpcMethod<string>(
+      'gen_getTransactionStatus',
+      [hash],
+      'Error getting transaction status',
+    ) as Promise<string>;
+  }
+
+  async getSentTransactions({
+    address,
+    limit,
+    before,
+  }: {
+    address: string;
+    limit: number;
+    // Cursor: the last (oldest) row of the previous page.
+    before?: { createdAt: string; hash: string };
+  }): Promise<any[]> {
+    return this.callRpcMethod<any[]>(
+      'sim_getSentTransactions',
+      [address, limit, before?.createdAt ?? null, before?.hash ?? null],
+      'Error getting sent transactions',
+    ) as Promise<any[]>;
+  }
+
   async getValidators(): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_getAllValidators',
