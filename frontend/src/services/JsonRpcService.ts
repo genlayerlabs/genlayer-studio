@@ -130,6 +130,18 @@ export class JsonRpcService implements IJsonRpcService {
     );
   }
 
+  async getTransactionsForAddress({
+    address,
+  }: {
+    address: string;
+  }): Promise<any[]> {
+    return this.callRpcMethod<any[]>(
+      'sim_getTransactionsForAddress',
+      [address],
+      'Error getting transactions for address',
+    ) as Promise<any[]>;
+  }
+
   async getValidators(): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_getAllValidators',
