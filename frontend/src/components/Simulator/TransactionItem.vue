@@ -640,9 +640,25 @@ const eqOutputRounds = computed(() => {
       }
     });
   }
-  if (rounds.length === 0) {
-    const outputs = decodeEqOutputs(leaderReceipt.value?.eq_outputs);
-    if (outputs.length > 0) rounds.push({ label: '', outputs });
+  // The active leader's proposal lives in consensus_data until its round is
+  // archived; show it after the archived ones, and only once it is archived.
+  const current = leaderReceipt.value;
+  const last = Array.isArray(results) ? results[results.length - 1] : null;
+  const archived = asRecord(last?.leader_result?.[0]);
+  const alreadyArchived =
+    archived !== null &&
+    JSON.stringify(archived.eq_outputs ?? null) ===
+      JSON.stringify(current?.eq_outputs ?? null) &&
+    JSON.stringify(archived.node_config?.address ?? null) ===
+      JSON.stringify(current?.node_config?.address ?? null);
+  if (!alreadyArchived) {
+    const outputs = decodeEqOutputs(current?.eq_outputs);
+    if (outputs.length > 0) {
+      rounds.push({
+        label: rounds.length > 0 ? 'Current Round' : '',
+        outputs,
+      });
+    }
   }
   return rounds;
 });
