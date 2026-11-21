@@ -1802,10 +1802,17 @@ class TransactionsProcessor:
         ]
 
     def get_sent_transactions_summary(
-        self, address: str, limit: int = 20, offset: int = 0
+        self,
+        address: str,
+        limit: int = 20,
+        before: tuple[datetime, str] | None = None,
     ) -> list[dict]:
         """Lightweight, paginated list of transactions sent *by* `address`
         (e.g. messages emitted by a contract), newest first.
+
+        `before` is a (created_at, hash) cursor: only transactions strictly
+        older in the (created_at, hash) descending order are returned, so
+        pages stay stable while new transactions are inserted.
 
         Selects only a few columns (no consensus data/history/snapshots) so it
         is cheap to poll; full details come from get_transaction_by_hash."""
@@ -1813,8 +1820,7 @@ class TransactionsProcessor:
             address = to_checksum_address(address)
         except Exception:
             pass
-        rows = (
-            self.session.query(
+        query = self.session.query(
                 Transactions.hash,
                 Transactions.from_address,
                 Transactions.to_address,
@@ -1823,10 +1829,20 @@ class TransactionsProcessor:
                 Transactions.created_at,
                 Transactions.triggered_by_hash,
                 Transactions.data["calldata"].as_string().label("calldata"),
+        ).filter(Transactions.from_address == address)
+        if before is not None:
+            before_created_at, before_hash = before
+            query = query.filter(
+                or_(
+                    Transactions.created_at < before_created_at,
+                    and_(
+                        Transactions.created_at == before_created_at,
+                        Transactions.hash < before_hash,
+                    ),
+                )
             )
-            .filter(Transactions.from_address == address)
-            .order_by(Transactions.created_at.desc(), Transactions.hash.desc())
-            .offset(offset)
+        rows = (
+            query.order_by(Transactions.created_at.desc(), Transactions.hash.desc())
             .limit(limit)
             .all()
         )

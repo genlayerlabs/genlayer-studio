@@ -297,7 +297,8 @@ def get_transactions_for_address(
 def get_sent_transactions(
     address: str,
     limit: int = 20,
-    offset: int = 0,
+    before_created_at: str | None = None,
+    before_hash: str | None = None,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
     accounts_manager: AccountsManager = Depends(get_accounts_manager),
 ) -> list[dict]:
@@ -306,7 +307,8 @@ def get_sent_transactions(
         accounts_manager=accounts_manager,
         address=address,
         limit=limit,
-        offset=offset,
+        before_created_at=before_created_at,
+        before_hash=before_hash,
     )
 
 

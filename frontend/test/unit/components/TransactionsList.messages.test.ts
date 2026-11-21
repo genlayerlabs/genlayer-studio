@@ -217,25 +217,53 @@ describe('TransactionsList messages', () => {
     wrapper.unmount();
   });
 
-  // Server-like paging over `total` rows, newest first, limit capped at 100.
-  const serve = (total: number) =>
-    getSentTransactions.mockImplementation(async ({ limit, offset = 0 }) =>
-      Array.from(
-        { length: Math.max(0, Math.min(total - offset, Math.min(limit, 100))) },
-        (_, i) => {
-          const n = offset + i;
-          return rpcRow(
-            `0x${n.toString(16).padStart(64, '0')}`,
-            addrA,
-            new Date(
-              Date.UTC(2026, 10, 1) + (total - n) * 60_000,
-            ).toISOString(),
-          );
-        },
-      ),
-    );
+  // Server-like paging over a mutable history, newest first, keyed by a
+  // (created_at, hash) cursor, limit capped at 100.
+  let history: { hash: string; at: number }[] = [];
+  const rowAt = (n: number) => ({
+    hash: `0x${n.toString(16).padStart(64, '0')}`,
+    at: Date.UTC(2026, 10, 1) + n * 60_000,
+  });
+  const serve = (total: number) => {
+    history = Array.from({ length: total }, (_, n) => rowAt(n + 1));
+    getSentTransactions.mockImplementation(async ({ limit, before }) => {
+      const sorted = [...history].sort((x, y) =>
+        x.at !== y.at ? y.at - x.at : y.hash.localeCompare(x.hash),
+      );
+      const start = before
+        ? sorted.findIndex((r) => r.hash === before.hash) + 1
+        : 0;
+      return sorted
+        .slice(start, start + Math.min(limit, 100))
+        .map((r) =>
+          rpcRow(r.hash, addrA, new Date(r.at).toISOString().replace('Z', '')),
+        );
+    });
+  };
+  const insertMessages = (count: number) => {
+    const max = Math.max(...history.map((r) => r.at));
+    for (let i = 1; i <= count; i++) {
+      history.push({
+        ...rowAt(0),
+        hash: `0xffff${(history.length + i).toString(16).padStart(60, '0')}`,
+        at: max + i * 60_000,
+      });
+    }
+  };
+  const poll = async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+  };
+  const loadAll = async (wrapper: any) => {
+    for (let i = 0; i < 20; i++) {
+      const more = wrapper.find('[data-testid="load-more-messages"]');
+      if (!more.exists()) break;
+      await more.trigger('click');
+      await flushPromises();
+    }
+  };
 
-  it('loads older pages by offset beyond 100 rows', async () => {
+  it('loads older pages by cursor beyond 100 rows', async () => {
     serve(130);
     const wrapper = mountList();
     await flushPromises();
@@ -251,8 +279,8 @@ describe('TransactionsList messages', () => {
     expect(wrapper.find('[data-testid="load-more-messages"]').exists()).toBe(
       false,
     );
-    const offsets = getSentTransactions.mock.calls.map((c) => c[0].offset);
-    expect(offsets).toContain(100);
+    const cursors = getSentTransactions.mock.calls.map((c) => c[0].before);
+    expect(cursors.filter(Boolean)).toHaveLength(6);
     expect(getSentTransactions.mock.calls.every((c) => c[0].limit <= 20)).toBe(
       true,
     );
@@ -279,6 +307,63 @@ describe('TransactionsList messages', () => {
     contracts.currentContractId = 'a';
     await flushPromises();
     expect(wrapper.findAll('.group')).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it('keeps history contiguous when messages arrive before loading older pages', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    const wrapper = mountList();
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(20);
+
+    insertMessages(1);
+    await poll();
+    await loadAll(wrapper);
+    expect(wrapper.findAll('.group')).toHaveLength(41);
+    wrapper.unmount();
+  });
+
+  it('keeps history contiguous when messages arrive after loading older pages', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    const wrapper = mountList();
+    await flushPromises();
+    await loadAll(wrapper);
+    expect(wrapper.findAll('.group')).toHaveLength(40);
+
+    insertMessages(1);
+    await poll();
+    expect(wrapper.findAll('.group')).toHaveLength(41);
+    insertMessages(3);
+    await poll();
+    expect(wrapper.findAll('.group')).toHaveLength(44);
+    wrapper.unmount();
+  });
+
+  it('restarts from the head instead of leaving a gap after a burst of messages', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    const wrapper = mountList();
+    await flushPromises();
+    await loadAll(wrapper);
+
+    insertMessages(30); // more than a page between two polls
+    await poll();
+    await loadAll(wrapper);
+    expect(wrapper.findAll('.group')).toHaveLength(70);
+    wrapper.unmount();
+  });
+
+  it('renders without crashing for a contract that is not deployed yet', async () => {
+    contracts.currentContractId = 'undeployed';
+    const wrapper = mountList();
+    await flushPromises();
+    expect(getSentTransactions).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-testid="load-more-messages"]').exists()).toBe(
+      false,
+    );
+    expect(wrapper.find('.empty').exists()).toBe(true);
     wrapper.unmount();
   });
 });

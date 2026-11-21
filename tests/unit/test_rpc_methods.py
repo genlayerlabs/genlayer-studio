@@ -418,13 +418,42 @@ def test_sent_transactions_summary_is_paginated_and_clamped():
     accounts.is_valid_address.return_value = True
 
     result = endpoints.get_sent_transactions_summary(
-        processor, accounts, "0xaddress", limit=10_000, offset=-5
+        processor, accounts, "0xaddress", limit=10_000
     )
 
     assert result == [{"hash": "0x1"}]
     processor.get_sent_transactions_summary.assert_called_once_with(
-        "0xaddress", endpoints.MAX_SENT_TRANSACTIONS_PAGE_SIZE, 0
+        "0xaddress", endpoints.MAX_SENT_TRANSACTIONS_PAGE_SIZE, None
     )
+
+
+def test_sent_transactions_summary_passes_cursor_and_rejects_partial_cursor():
+    processor = MagicMock()
+    processor.get_sent_transactions_summary.return_value = []
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = True
+
+    endpoints.get_sent_transactions_summary(
+        processor,
+        accounts,
+        "0xaddress",
+        limit=5,
+        before_created_at="2026-11-18T10:00:00.123456",
+        before_hash="0xabc",
+    )
+    (_, limit, before), _ = processor.get_sent_transactions_summary.call_args
+    assert limit == 5
+    assert before[0].isoformat() == "2026-11-18T10:00:00.123456"
+    assert before[1] == "0xabc"
+
+    with pytest.raises(JSONRPCError):
+        endpoints.get_sent_transactions_summary(
+            processor, accounts, "0xaddress", before_created_at="2026-11-18T10:00:00"
+        )
+    with pytest.raises(JSONRPCError):
+        endpoints.get_sent_transactions_summary(
+            processor, accounts, "0xaddress", before_created_at="nope", before_hash="0x1"
+        )
 
 
 def test_sent_transactions_summary_rejects_invalid_address():

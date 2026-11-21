@@ -30,12 +30,12 @@ const MESSAGES_PAGE_SIZE = 20;
 // from the Studio backend; full details are fetched when a row is opened.
 // Rows are keyed by the contract address they were fetched for, so a row of
 // another contract is never shown.
-// `newest` is the polled first page; `older` are pages appended with
-// "Load more" (by offset, each bounded by the page size).
+// `items` is ordered newest first, as the server sorts (created_at, hash).
+// The polled head page is reconciled into it and "Load more" appends older
+// pages using the last row as a cursor, so insertions never shift pages.
 const messagesState = ref<{
   address: string;
-  newest: TransactionItemType[];
-  older: TransactionItemType[];
+  items: TransactionItemType[];
   hasMore: boolean;
 } | null>(null);
 const loadingMore = ref(false);
@@ -77,7 +77,7 @@ const messages = computed<TransactionItemType[]>(() => {
   if (!state || state.address !== currentAddress.value) return [];
   const cutoff = clearedCutoffs.value[state.address] ?? -Infinity;
   const seen = new Set<string>();
-  return [...state.newest, ...state.older]
+  return state.items
     .filter((m) => {
       // A new message may shift pages, so the same hash can appear twice.
       if (seen.has(m.hash)) return false;
@@ -92,7 +92,9 @@ const messages = computed<TransactionItemType[]>(() => {
 
 const canLoadMore = computed(() => {
   const state = messagesState.value;
-  return state?.address === currentAddress.value && state.hasMore;
+  return Boolean(
+    state && state.address === currentAddress.value && state.hasMore,
+  );
 });
 
 async function loadMoreMessages() {
@@ -107,13 +109,17 @@ async function loadMoreMessages() {
     const result = await rpcClient.getSentTransactions({
       address,
       limit: MESSAGES_PAGE_SIZE,
-      offset: state.newest.length + state.older.length,
+      before: cursorOf(state.items),
     });
-    if (gen !== generation || messagesState.value !== state) return;
+    if (gen !== generation) return;
+    const current = messagesState.value;
+    // The list was reset meanwhile (gap or contract change): drop the page.
+    if (!current || current.address !== address) return;
+    if (cursorOf(current.items)?.hash !== cursorOf(state.items)?.hash) return;
     const page = toItems(result);
     messagesState.value = {
-      ...state,
-      older: [...state.older, ...page],
+      ...current,
+      items: [...current.items, ...page],
       hasMore: page.length === MESSAGES_PAGE_SIZE,
     };
   } catch (e) {
@@ -121,6 +127,37 @@ async function loadMoreMessages() {
   } finally {
     loadingMore.value = false;
   }
+}
+
+function cursorOf(items: TransactionItemType[]) {
+  const last = items[items.length - 1];
+  return last
+    ? { createdAt: last.data?.created_at, hash: last.hash }
+    : undefined;
+}
+
+// Merge a freshly polled head page into the loaded list. Rows only get
+// inserted at the head, so the loaded older rows are kept below the head's
+// last overlapping row. Without overlap on a full page more than a page of
+// new rows arrived: restart from the head to avoid a gap.
+function mergeHead(
+  previous: TransactionItemType[],
+  head: TransactionItemType[],
+) {
+  if (previous.length === 0 || head.length < MESSAGES_PAGE_SIZE) {
+    return {
+      items: head,
+      reset: previous.length === 0 || head.length < MESSAGES_PAGE_SIZE,
+    };
+  }
+  const known = new Map(previous.map((m, i) => [m.hash, i]));
+  let overlap = -1;
+  head.forEach((m, i) => {
+    if (known.has(m.hash)) overlap = i;
+  });
+  if (overlap === -1) return { items: head, reset: true };
+  const tail = previous.slice(known.get(head[overlap].hash)! + 1);
+  return { items: [...head, ...tail], reset: false };
 }
 
 function toItems(result: any[] | undefined) {
@@ -176,14 +213,15 @@ async function refreshMessages(gen: number, address: string) {
     if (gen !== generation) return;
     const items = toItems(result);
     const previous = messagesState.value;
+    const base = previous?.address === address ? previous.items : [];
+    const merged = mergeHead(base, items);
     messagesState.value = {
       address,
-      newest: items,
-      older: previous?.address === address ? previous.older : [],
+      items: merged.items,
       hasMore:
-        previous?.address === address && previous.older.length > 0
-          ? previous.hasMore
-          : items.length === MESSAGES_PAGE_SIZE,
+        merged.reset || !previous || previous.address !== address
+          ? items.length === MESSAGES_PAGE_SIZE
+          : previous.hasMore,
     };
     // Refresh details of rows already opened when their status moved on.
     for (const item of items) {
