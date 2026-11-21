@@ -1801,6 +1801,49 @@ class TransactionsProcessor:
             self._parse_transaction_data(transaction) for transaction in transactions
         ]
 
+    def get_sent_transactions_summary(
+        self, address: str, limit: int = 20, offset: int = 0
+    ) -> list[dict]:
+        """Lightweight, paginated list of transactions sent *by* `address`
+        (e.g. messages emitted by a contract), newest first.
+
+        Selects only a few columns (no consensus data/history/snapshots) so it
+        is cheap to poll; full details come from get_transaction_by_hash."""
+        try:
+            address = to_checksum_address(address)
+        except Exception:
+            pass
+        rows = (
+            self.session.query(
+                Transactions.hash,
+                Transactions.from_address,
+                Transactions.to_address,
+                Transactions.type,
+                Transactions.status,
+                Transactions.created_at,
+                Transactions.triggered_by_hash,
+                Transactions.data["calldata"].as_string().label("calldata"),
+            )
+            .filter(Transactions.from_address == address)
+            .order_by(Transactions.created_at.desc(), Transactions.hash.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "hash": r.hash,
+                "from_address": r.from_address,
+                "to_address": r.to_address,
+                "type": r.type,
+                "status": r.status.value,
+                "created_at": r.created_at.isoformat(),
+                "triggered_by": r.triggered_by_hash,
+                "data": {"calldata": r.calldata} if r.calldata else {},
+            }
+            for r in rows
+        ]
+
     def set_transaction_appeal(self, transaction_hash: str, appeal: bool):
         if not appeal:
             self.session.execute(

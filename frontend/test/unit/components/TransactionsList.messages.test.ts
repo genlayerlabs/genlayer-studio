@@ -1,95 +1,218 @@
 import { flushPromises, mount } from '@vue/test-utils';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ref } from 'vue';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { reactive } from 'vue';
+import { abi } from 'genlayer-js';
 import TransactionsList from '@/components/Simulator/TransactionsList.vue';
 
-const getTransactionsForAddress = vi.fn();
-const address = '0xAbCd000000000000000000000000000000000001';
-const isStudio = ref(true);
+const getSentTransactions = vi.fn();
+const getTransaction = vi.fn();
+const clearTransactionsForContract = vi.fn();
+
+const addrA = '0xAbCd000000000000000000000000000000000001';
+const addrB = '0xAbCd000000000000000000000000000000000002';
+
+const contracts = reactive({
+  currentContractId: 'a',
+  deployedContracts: [
+    { contractId: 'a', address: addrA },
+    { contractId: 'b', address: addrB },
+  ],
+});
+const network = reactive({ isStudio: true });
+const txs = reactive({
+  transactions: [] as any[],
+  clearTransactionsForContract,
+  getTransaction,
+});
 
 vi.mock('@/stores', () => ({
-  useContractsStore: vi.fn(() => ({
-    currentContractId: 'c1',
-    deployedContracts: [{ contractId: 'c1', address }],
-  })),
-  useNetworkStore: vi.fn(() => ({
-    get isStudio() {
-      return isStudio.value;
-    },
-  })),
-  useTransactionsStore: vi.fn(() => ({
-    transactions: [
-      {
-        hash: '0xincoming',
-        localContractId: 'c1',
-        data: { created_at: '2026-11-18T10:00:00Z' },
-      },
-    ],
-    clearTransactionsForContract: vi.fn(),
-  })),
+  useContractsStore: () => contracts,
+  useNetworkStore: () => network,
+  useTransactionsStore: () => txs,
+  useUIStore: () => ({ mode: 'light' }),
+  useNodeStore: () => ({ searchFilter: '' }),
 }));
-
 vi.mock('@/hooks', () => ({
-  useRpcClient: vi.fn(() => ({ getTransactionsForAddress })),
+  useRpcClient: () => ({ getSentTransactions }),
 }));
+vi.mock('@kyvg/vue3-notification', () => ({ notify: vi.fn() }));
+vi.mock('@vueuse/core', () => ({
+  useTimeAgo: () => ({ value: 'just now' }),
+  useTimestamp: () => ({ value: Date.now() }),
+}));
+vi.mock('@/utils/runtimeConfig', () => ({
+  getRuntimeConfigBoolean: () => false,
+  getRuntimeConfigNumber: () => 0,
+}));
+vi.mock('@/utils/explorerUrl', () => ({ getExplorerUrl: () => 'http://x' }));
+
+const calldata = (method: string, args: any[]) =>
+  btoa(
+    String.fromCharCode(
+      ...abi.calldata.encode(abi.calldata.makeCalldataObject(method, args, {})),
+    ),
+  );
+
+// What sim_getSentTransactions returns for a row.
+const rpcRow = (hash: string, from: string, createdAt: string, extra = {}) => ({
+  hash,
+  from_address: from,
+  to_address: '0x9999999999999999999999999999999999999999',
+  type: 2,
+  status: 'FINALIZED',
+  created_at: createdAt,
+  triggered_by: '0xparent',
+  data: { calldata: calldata('ping', [7]) },
+  ...extra,
+});
+
+const ModalStub = {
+  props: ['open'],
+  template:
+    '<section v-if="open" class="modal"><slot name="title" /><slot /></section>',
+};
 
 const mountList = () =>
   mount(TransactionsList, {
     global: {
       directives: { tooltip: {} },
       stubs: {
-        PageSection: { template: '<div><slot /></div>' },
-        GhostBtn: true,
-        ConfirmationModal: true,
-        EmptyListPlaceholder: true,
-        TransactionItem: {
-          props: ['transaction'],
-          template: '<div class="tx">{{ transaction.hash }}</div>',
+        PageSection: {
+          template: '<div><slot name="actions" /><slot /></div>',
         },
+        GhostBtn: {
+          template: '<button class="clear" @click="$emit(\'click\')" />',
+        },
+        ConfirmationModal: {
+          props: ['open'],
+          emits: ['confirm'],
+          template:
+            '<div v-if="open" class="confirm"><button class="ok" @click="$emit(\'confirm\')" /></div>',
+        },
+        EmptyListPlaceholder: { template: '<p class="empty"><slot /></p>' },
+        Modal: ModalStub,
+        Btn: true,
+        CopyTextButton: true,
+        JsonViewer: true,
+        Loader: true,
+        TransactionStatusBadge: true,
+        CheckCircleIcon: true,
+        XCircleIcon: true,
+        EllipsisHorizontalCircleIcon: true,
+        FilterIcon: true,
+        GavelIcon: true,
+        UserPen: true,
+        UserSearch: true,
+        ExternalLink: true,
       },
     },
   });
 
+const rowHashes = (w: any) => w.findAll('.font-mono').map((x: any) => x.text());
+
+beforeEach(() => {
+  getSentTransactions.mockReset();
+  getTransaction.mockReset();
+  contracts.currentContractId = 'a';
+  network.isStudio = true;
+  txs.transactions = [];
+});
 afterEach(() => {
-  vi.clearAllMocks();
-  isStudio.value = true;
+  vi.resetAllMocks();
+  vi.useRealTimers();
 });
 
 describe('TransactionsList messages', () => {
-  it('shows transactions sent by the contract next to received ones', async () => {
-    getTransactionsForAddress.mockResolvedValue([
-      {
-        hash: '0xincoming',
-        from_address: '0xuser',
-        to_address: address,
-        created_at: '2026-11-18T10:00:00Z',
-      },
-      {
-        hash: '0xmessage',
-        from_address: address.toLowerCase(),
-        to_address: '0xother',
-        created_at: '2026-11-18T11:00:00Z',
-      },
-      { hash: '0xunrelated', from_address: '0xuser', to_address: '0xother' },
+  it('renders sent rows with method name and decoded Input from a real RPC row', async () => {
+    getSentTransactions.mockResolvedValue([
+      rpcRow(`0x${'1'.repeat(64)}`, addrA, '2026-11-18T11:00:00Z'),
     ]);
     const wrapper = mountList();
     await flushPromises();
-    expect(getTransactionsForAddress).toHaveBeenCalledWith({
-      address: address.toLowerCase(),
+
+    expect(getSentTransactions).toHaveBeenCalledWith({
+      address: addrA.toLowerCase(),
+      limit: 20,
     });
-    expect(wrapper.findAll('.tx').map((w) => w.text())).toEqual([
-      '0xmessage',
-      '0xincoming',
-    ]);
+    expect(wrapper.text()).toContain('ping');
+
+    getTransaction.mockResolvedValue({ hash: `0x${'1'.repeat(64)}` });
+    await wrapper.find('.group').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.modal').exists()).toBe(true);
+    expect(wrapper.find('.modal').text()).toContain('Input');
+    expect(wrapper.find('.modal pre').text()).toContain('7');
+    expect(getTransaction).toHaveBeenCalledTimes(1); // details on demand
     wrapper.unmount();
   });
 
-  it('does not query messages outside Studio', async () => {
-    isStudio.value = false;
+  it('does not query outside Studio', async () => {
+    network.isStudio = false;
     const wrapper = mountList();
     await flushPromises();
-    expect(getTransactionsForAddress).not.toHaveBeenCalled();
-    expect(wrapper.findAll('.tx')).toHaveLength(1);
+    expect(getSentTransactions).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('drops the previous contract rows on switch, even while pending or failing', async () => {
+    getSentTransactions.mockResolvedValueOnce([
+      rpcRow(`0x${'a'.repeat(64)}`, addrA, '2026-11-18T11:00:00Z'),
+    ]);
+    const wrapper = mountList();
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(1);
+
+    let rejectB: (e: Error) => void = () => {};
+    getSentTransactions.mockReturnValueOnce(
+      new Promise((_, reject) => (rejectB = reject)),
+    );
+    contracts.currentContractId = 'b';
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0); // pending
+
+    rejectB(new Error('boom'));
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0); // failed
+    wrapper.unmount();
+  });
+
+  it('keeps one request in flight and accepts responses slower than the poll interval', async () => {
+    vi.useFakeTimers();
+    const resolvers: Array<(v: any[]) => void> = [];
+    getSentTransactions.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+    const wrapper = mountList();
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(20_000); // way past the interval
+    expect(getSentTransactions).toHaveBeenCalledTimes(1);
+
+    resolvers[0]([
+      rpcRow(`0x${'c'.repeat(64)}`, addrA, '2026-11-18T11:00:00Z'),
+    ]);
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(getSentTransactions).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it('clear hides fetched messages too', async () => {
+    getSentTransactions.mockResolvedValue([
+      rpcRow(`0x${'d'.repeat(64)}`, addrA, '2026-11-18T11:00:00Z'),
+    ]);
+    const wrapper = mountList();
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(1);
+
+    await wrapper.find('.clear').trigger('click');
+    await wrapper.find('.ok').trigger('click');
+    await flushPromises();
+    expect(clearTransactionsForContract).toHaveBeenCalledWith('a');
+    expect(wrapper.findAll('.group')).toHaveLength(0);
+    expect(wrapper.find('.empty').exists()).toBe(true);
     wrapper.unmount();
   });
 });

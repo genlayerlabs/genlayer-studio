@@ -3529,6 +3529,24 @@ def get_transactions_for_address(
     )
 
 
+MAX_SENT_TRANSACTIONS_PAGE_SIZE = 100
+
+
+def get_sent_transactions_summary(
+    transactions_processor: TransactionsProcessor,
+    accounts_manager: AccountsManager,
+    address: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict]:
+    """Lightweight, paginated transactions sent by `address` (no consensus data)."""
+    if not accounts_manager.is_valid_address(address):
+        raise InvalidAddressError(address)
+    limit = max(1, min(int(limit), MAX_SENT_TRANSACTIONS_PAGE_SIZE))
+    offset = max(0, int(offset))
+    return transactions_processor.get_sent_transactions_summary(address, limit, offset)
+
+
 @check_forbidden_method_in_hosted_studio
 def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
     if consensus is None:

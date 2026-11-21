@@ -409,3 +409,26 @@ async def test_update_validator_forwards_config_argument(monkeypatch):
         plugin="openai-compatible",
         plugin_config=plugin_config,
     )
+
+
+def test_sent_transactions_summary_is_paginated_and_clamped():
+    processor = MagicMock()
+    processor.get_sent_transactions_summary.return_value = [{"hash": "0x1"}]
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = True
+
+    result = endpoints.get_sent_transactions_summary(
+        processor, accounts, "0xaddress", limit=10_000, offset=-5
+    )
+
+    assert result == [{"hash": "0x1"}]
+    processor.get_sent_transactions_summary.assert_called_once_with(
+        "0xaddress", endpoints.MAX_SENT_TRANSACTIONS_PAGE_SIZE, 0
+    )
+
+
+def test_sent_transactions_summary_rejects_invalid_address():
+    accounts = MagicMock()
+    accounts.is_valid_address.return_value = False
+    with pytest.raises(Exception):
+        endpoints.get_sent_transactions_summary(MagicMock(), accounts, "nope")

@@ -131,3 +131,17 @@ function encodeBase64(binary: string): string {
     return Buffer.from(binary, 'binary').toString('base64');
   throw new Error('No base64 encoder available in this environment');
 }
+
+/** Name of the method encoded in a calldata payload, if it has one. */
+export function calldataMethodName(cd: Uint8Array): string | undefined {
+  try {
+    const decoded: any = abi.calldata.decode(cd);
+    const method =
+      decoded instanceof Map
+        ? (decoded.get('') ?? decoded.get('method'))
+        : decoded?.method;
+    return typeof method === 'string' ? method : undefined;
+  } catch {
+    return undefined;
+  }
+}

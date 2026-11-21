@@ -6,6 +6,7 @@ import {
   useNetworkStore,
 } from '@/stores';
 import { useRpcClient } from '@/hooks';
+import { toSentTransactionItem } from '@/utils/sentTransactions';
 import type { TransactionItem as TransactionItemType } from '@/types';
 import { TrashIcon } from '@heroicons/vue/24/solid';
 import TransactionItem from './TransactionItem.vue';
@@ -22,10 +23,20 @@ const props = defineProps({
 });
 
 const MESSAGES_POLL_INTERVAL_MS = 5_000;
+const MESSAGES_PAGE_SIZE = 20;
 
 // Transactions sent by the current contract (messages it emitted). They are
-// not created from this client, so they are fetched from the Studio backend.
-const messages = ref<TransactionItemType[]>([]);
+// not created from this client, so a lightweight, paginated summary is polled
+// from the Studio backend; full details are fetched when a row is opened.
+// Rows are keyed by the contract address they were fetched for, so a row of
+// another contract is never shown.
+const messagesState = ref<{
+  address: string;
+  items: TransactionItemType[];
+} | null>(null);
+const messagesLimit = ref(MESSAGES_PAGE_SIZE);
+const messageDetails = ref<Record<string, any>>({});
+const dismissedMessages = ref<Set<string>>(new Set());
 
 const currentAddress = computed(() => {
   const id = contractsStore.currentContractId;
@@ -34,57 +45,119 @@ const currentAddress = computed(() => {
     ?.address?.toLowerCase();
 });
 
-function toMessageItem(tx: any): TransactionItemType {
-  return {
-    hash: tx.hash,
-    type: tx.type === 1 || tx.type === 'deploy' ? 'deploy' : 'method',
-    statusName: tx.statusName ?? tx.status_name ?? tx.status,
-    contractAddress: tx.to_address ?? tx.recipient ?? '',
-    localContractId: contractsStore.currentContractId ?? '',
-    data: { ...tx },
-  };
+const messages = computed<TransactionItemType[]>(() => {
+  const state = messagesState.value;
+  if (!state || state.address !== currentAddress.value) return [];
+  return state.items
+    .filter((m) => !dismissedMessages.value.has(m.hash))
+    .map((m) => {
+      const details = messageDetails.value[m.hash];
+      return details ? { ...m, data: { ...m.data, ...details } } : m;
+    });
+});
+
+const canLoadMore = computed(() => {
+  const state = messagesState.value;
+  return (
+    state?.address === currentAddress.value &&
+    state?.items.length === messagesLimit.value
+  );
+});
+
+async function loadMessageDetails(hash: string) {
+  try {
+    const tx: any = await transactionsStore.getTransaction(hash as any);
+    if (tx) {
+      messageDetails.value = {
+        ...messageDetails.value,
+        [hash]: { ...tx, hash },
+      };
+    }
+  } catch (e) {
+    console.warn('Error loading transaction details', e);
+  }
 }
 
-let messagesRequest = 0;
-async function loadMessages() {
-  const address = currentAddress.value;
-  const request = ++messagesRequest;
-  if (!address || !networkStore.isStudio) {
-    messages.value = [];
-    return;
+// A message row opens its modal with the summary right away; the full
+// transaction (consensus data, result, ...) is fetched on demand.
+function onRowClick(transaction: TransactionItemType) {
+  if (
+    messages.value.some((m) => m.hash === transaction.hash) &&
+    !messageDetails.value[transaction.hash]
+  ) {
+    loadMessageDetails(transaction.hash);
   }
+}
+
+let generation = 0;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function stopMessages() {
+  generation++;
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+// One request at a time per contract: the next refresh is scheduled only
+// after the previous one settled, so slow responses are never discarded.
+async function refreshMessages(gen: number, address: string) {
   try {
-    const result = await rpcClient.getTransactionsForAddress({ address });
-    // Drop stale responses (contract or network changed meanwhile).
-    if (request !== messagesRequest) return;
-    messages.value = (result ?? [])
-      .filter(
-        (tx: any) => tx?.hash && tx.from_address?.toLowerCase() === address,
-      )
-      .map(toMessageItem);
+    const result = await rpcClient.getSentTransactions({
+      address,
+      limit: messagesLimit.value,
+    });
+    if (gen !== generation) return;
+    const items = (result ?? [])
+      .filter((tx: any) => tx?.hash)
+      .map((tx: any) =>
+        toSentTransactionItem(tx, contractsStore.currentContractId ?? ''),
+      );
+    messagesState.value = { address, items };
+    // Refresh details of rows already opened when their status moved on.
+    for (const item of items) {
+      const details = messageDetails.value[item.hash];
+      if (
+        details &&
+        (details.statusName ?? details.status) !== item.statusName
+      ) {
+        loadMessageDetails(item.hash);
+      }
+    }
   } catch (e) {
-    if (request !== messagesRequest) return;
+    if (gen !== generation) return;
     console.warn('Error loading transactions sent by contract', e);
   }
+  if (gen === generation) {
+    pollTimer = setTimeout(
+      () => refreshMessages(gen, address),
+      MESSAGES_POLL_INTERVAL_MS,
+    );
+  }
 }
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+function startMessages() {
+  stopMessages();
+  const address = currentAddress.value;
+  if (!address || !networkStore.isStudio) {
+    messagesState.value = null;
+    return;
+  }
+  refreshMessages(generation, address);
+}
+
 watch(
   () => [currentAddress.value, networkStore.isStudio] as const,
   () => {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
-    loadMessages();
-    if (currentAddress.value && networkStore.isStudio) {
-      pollTimer = setInterval(loadMessages, MESSAGES_POLL_INTERVAL_MS);
-    }
+    messagesState.value = null;
+    messagesLimit.value = MESSAGES_PAGE_SIZE;
+    messageDetails.value = {};
+    dismissedMessages.value = new Set();
+    startMessages();
   },
   { immediate: true },
 );
-onBeforeUnmount(() => {
-  messagesRequest++;
-  if (pollTimer) clearInterval(pollTimer);
-});
+watch(messagesLimit, startMessages);
+onBeforeUnmount(stopMessages);
 
 const transactions = computed(() => {
   const contractTransactions = transactionsStore.transactions.filter(
@@ -109,6 +182,11 @@ const handleClearTransactions = () => {
   transactionsStore.clearTransactionsForContract(
     contractsStore.currentContractId ?? '',
   );
+  // Messages are not stored locally: hide the ones currently listed.
+  dismissedMessages.value = new Set([
+    ...dismissedMessages.value,
+    ...messages.value.map((m) => m.hash),
+  ]);
 
   isClearTransactionsModalOpen.value = false;
 };
@@ -128,12 +206,24 @@ const handleClearTransactions = () => {
     ></template>
 
     <div class="flex flex-col">
-      <TransactionItem
+      <div
         v-for="transaction in transactions"
         :key="transaction.hash"
-        :transaction="transaction"
-        :finalityWindow="props.finalityWindow ?? 0"
-      />
+        @click="onRowClick(transaction)"
+      >
+        <TransactionItem
+          :transaction="transaction"
+          :finalityWindow="props.finalityWindow ?? 0"
+        />
+      </div>
+      <button
+        v-if="canLoadMore"
+        class="py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400"
+        data-testid="load-more-messages"
+        @click="messagesLimit += MESSAGES_PAGE_SIZE"
+      >
+        Load more sent transactions
+      </button>
     </div>
 
     <EmptyListPlaceholder v-if="transactions.length === 0">
@@ -149,7 +239,9 @@ const handleClearTransactions = () => {
     >
       <template #title>Clear Transaction List</template>
       <template #description
-        >Are you sure you want to clear all transactions?</template
+        >Are you sure you want to clear all transactions? Transactions sent by
+        this contract are hidden from the list until new ones are
+        sent.</template
       >
     </ConfirmationModal>
   </PageSection>
