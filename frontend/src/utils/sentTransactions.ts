@@ -45,3 +45,26 @@ export function toSentTransactionItem(
     decodedData,
   };
 }
+
+/**
+ * Compares two ISO timestamps without losing sub-millisecond precision
+ * (the backend stores microseconds; Date only keeps milliseconds).
+ * Returns <0, 0 or >0 like a sort comparator. Unparseable values sort first.
+ */
+export function compareTimestamps(a: string, b: string): number {
+  const parse = (value: string) => {
+    const m = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(value ?? '');
+    if (!m) return { ms: NaN, frac: '' };
+    return {
+      ms: Date.parse(`${m[1]}${m[3] ?? ''}`),
+      frac: (m[2] ?? '').padEnd(9, '0'),
+    };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (Number.isNaN(x.ms) || Number.isNaN(y.ms)) {
+    return Number.isNaN(x.ms) ? (Number.isNaN(y.ms) ? 0 : -1) : 1;
+  }
+  if (x.ms !== y.ms) return x.ms - y.ms;
+  return x.frac < y.frac ? -1 : x.frac > y.frac ? 1 : 0;
+}

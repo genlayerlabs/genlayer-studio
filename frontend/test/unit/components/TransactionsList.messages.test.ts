@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reactive } from 'vue';
 import { abi } from 'genlayer-js';
+import TransactionItemComponent from '@/components/Simulator/TransactionItem.vue';
 import TransactionsList from '@/components/Simulator/TransactionsList.vue';
 
 const getSentTransactions = vi.fn();
@@ -219,7 +220,7 @@ describe('TransactionsList messages', () => {
 
   // Server-like paging over a mutable history, newest first, keyed by a
   // (created_at, hash) cursor, limit capped at 100.
-  let history: { hash: string; at: number }[] = [];
+  let history: { hash: string; at: number; status?: string }[] = [];
   const rowAt = (n: number) => ({
     hash: `0x${n.toString(16).padStart(64, '0')}`,
     at: Date.UTC(2026, 10, 1) + n * 60_000,
@@ -236,7 +237,12 @@ describe('TransactionsList messages', () => {
       return sorted
         .slice(start, start + Math.min(limit, 100))
         .map((r) =>
-          rpcRow(r.hash, addrA, new Date(r.at).toISOString().replace('Z', '')),
+          rpcRow(
+            r.hash,
+            addrA,
+            new Date(r.at).toISOString().replace('Z', ''),
+            r.status ? { status: r.status } : {},
+          ),
         );
     });
   };
@@ -364,6 +370,69 @@ describe('TransactionsList messages', () => {
       false,
     );
     expect(wrapper.find('.empty').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  const statuses = (wrapper: any) =>
+    wrapper
+      .findAllComponents(TransactionItemComponent)
+      .map((c: any) => c.props('transaction').statusName);
+
+  it('refreshes the status of older loaded rows that are not final', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    history[0].status = 'PENDING'; // oldest row, on the second page
+    const wrapper = mountList();
+    await flushPromises();
+    await loadAll(wrapper);
+    expect(statuses(wrapper)[39]).toBe('PENDING');
+
+    getTransaction.mockResolvedValue({ statusName: 'FINALIZED' });
+    await poll();
+    expect(getTransaction).toHaveBeenCalledTimes(1);
+    expect(statuses(wrapper)[39]).toBe('FINALIZED');
+    wrapper.unmount();
+  });
+
+  it('applies the status of the details fetched on open to the row', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    history[0].status = 'PENDING';
+    const wrapper = mountList();
+    await flushPromises();
+    await loadAll(wrapper);
+
+    getTransaction.mockResolvedValue({
+      statusName: 'FINALIZED',
+      hash: history[0].hash,
+    });
+    await wrapper.findAll('.group')[39].trigger('click');
+    await flushPromises();
+    expect(statuses(wrapper)[39]).toBe('FINALIZED');
+    wrapper.unmount();
+  });
+
+  it('clear keeps a message that is newer by less than a millisecond', async () => {
+    const hash = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+    const rows = [
+      { hash: hash(2), created_at: '2026-11-18T10:00:00.123900' },
+      { hash: hash(1), created_at: '2026-11-18T10:00:00.123100' },
+    ];
+    let visible = rows.slice(1); // only the older one exists at clear time
+    getSentTransactions.mockImplementation(async () =>
+      visible.map((r) => rpcRow(r.hash, addrA, r.created_at)),
+    );
+    vi.useFakeTimers();
+    const wrapper = mountList();
+    await flushPromises();
+    await wrapper.find('.clear').trigger('click');
+    await wrapper.find('.ok').trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.group')).toHaveLength(0);
+
+    visible = rows; // a message within the same millisecond arrives
+    await poll();
+    expect(wrapper.findAll('.group')).toHaveLength(1);
     wrapper.unmount();
   });
 });

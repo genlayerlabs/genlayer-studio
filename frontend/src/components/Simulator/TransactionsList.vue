@@ -6,7 +6,10 @@ import {
   useNetworkStore,
 } from '@/stores';
 import { useRpcClient } from '@/hooks';
-import { toSentTransactionItem } from '@/utils/sentTransactions';
+import {
+  compareTimestamps,
+  toSentTransactionItem,
+} from '@/utils/sentTransactions';
 import type { TransactionItem as TransactionItemType } from '@/types';
 import { TrashIcon } from '@heroicons/vue/24/solid';
 import TransactionItem from './TransactionItem.vue';
@@ -45,15 +48,26 @@ const messageDetails = ref<Record<string, any>>({});
 // newest one listed at that moment (also the older, not yet loaded pages).
 // The cutoff is kept per contract address in localStorage.
 const CLEARED_STORAGE_KEY = 'transactionsList.clearedMessagesBefore';
-function readCutoffs(): Record<string, number> {
+// Cutoffs are the raw ISO created_at of the newest cleared message, so the
+// backend's microsecond precision is preserved.
+function readCutoffs(): Record<string, string> {
   try {
-    return JSON.parse(localStorage.getItem(CLEARED_STORAGE_KEY) ?? '{}') ?? {};
+    const stored = JSON.parse(
+      localStorage.getItem(CLEARED_STORAGE_KEY) ?? '{}',
+    ) as Record<string, string | number>;
+    return Object.fromEntries(
+      Object.entries(stored).map(([address, value]) => [
+        address,
+        // Older versions stored epoch milliseconds.
+        typeof value === 'number' ? new Date(value).toISOString() : value,
+      ]),
+    );
   } catch {
     return {};
   }
 }
-const clearedCutoffs = ref<Record<string, number>>(readCutoffs());
-function setCutoff(address: string, cutoff: number) {
+const clearedCutoffs = ref<Record<string, string>>(readCutoffs());
+function setCutoff(address: string, cutoff: string) {
   clearedCutoffs.value = { ...clearedCutoffs.value, [address]: cutoff };
   try {
     localStorage.setItem(
@@ -75,14 +89,14 @@ const currentAddress = computed(() => {
 const messages = computed<TransactionItemType[]>(() => {
   const state = messagesState.value;
   if (!state || state.address !== currentAddress.value) return [];
-  const cutoff = clearedCutoffs.value[state.address] ?? -Infinity;
+  const cutoff = clearedCutoffs.value[state.address];
   const seen = new Set<string>();
   return state.items
     .filter((m) => {
       // A new message may shift pages, so the same hash can appear twice.
       if (seen.has(m.hash)) return false;
       seen.add(m.hash);
-      return new Date(m.data?.created_at).getTime() > cutoff;
+      return !cutoff || compareTimestamps(m.data?.created_at, cutoff) > 0;
     })
     .map((m) => {
       const details = messageDetails.value[m.hash];
@@ -151,12 +165,14 @@ function mergeHead(
     };
   }
   const known = new Map(previous.map((m, i) => [m.hash, i]));
-  let overlap = -1;
-  head.forEach((m, i) => {
-    if (known.has(m.hash)) overlap = i;
-  });
-  if (overlap === -1) return { items: head, reset: true };
-  const tail = previous.slice(known.get(head[overlap].hash)! + 1);
+  // Index in `previous` of the last (oldest) head row it already knew.
+  let overlapIndex = -1;
+  for (const m of head) {
+    const index = known.get(m.hash);
+    if (index !== undefined) overlapIndex = index;
+  }
+  if (overlapIndex === -1) return { items: head, reset: true };
+  const tail = previous.slice(overlapIndex + 1);
   return { items: [...head, ...tail], reset: false };
 }
 
@@ -168,10 +184,55 @@ function toItems(result: any[] | undefined) {
     );
 }
 
+function statusOf(tx: any): string | undefined {
+  return tx?.statusName ?? tx?.status_name ?? tx?.status;
+}
+
+// Apply a fresher status to the loaded row (and so to its modal).
+function applyStatus(hash: string, status: string | undefined) {
+  const state = messagesState.value;
+  if (!state || !status) return;
+  if (!state.items.some((m) => m.hash === hash && m.statusName !== status)) {
+    return;
+  }
+  messagesState.value = {
+    ...state,
+    items: state.items.map((m) =>
+      m.hash === hash ? { ...m, statusName: status as any } : m,
+    ),
+  };
+}
+
+const FINAL_MESSAGE_STATUSES = new Set(['FINALIZED', 'CANCELED']);
+const MAX_STALE_REFRESHES_PER_POLL = 10;
+
+// Polling only refreshes the newest page. Older loaded rows that can still
+// change status are re-read individually (bounded per poll).
+async function refreshStaleMessages(gen: number, headHashes: Set<string>) {
+  const stale = (messagesState.value?.items ?? [])
+    .filter(
+      (m) =>
+        !headHashes.has(m.hash) &&
+        !FINAL_MESSAGE_STATUSES.has(String(m.statusName)),
+    )
+    .slice(0, MAX_STALE_REFRESHES_PER_POLL);
+  await Promise.all(
+    stale.map(async (m) => {
+      try {
+        const tx: any = await transactionsStore.getTransaction(m.hash as any);
+        if (gen === generation) applyStatus(m.hash, statusOf(tx));
+      } catch (e) {
+        console.warn('Error refreshing transaction status', e);
+      }
+    }),
+  );
+}
+
 async function loadMessageDetails(hash: string) {
   try {
     const tx: any = await transactionsStore.getTransaction(hash as any);
     if (tx) {
+      applyStatus(hash, statusOf(tx));
       messageDetails.value = {
         ...messageDetails.value,
         [hash]: { ...tx, hash },
@@ -223,13 +284,11 @@ async function refreshMessages(gen: number, address: string) {
           ? items.length === MESSAGES_PAGE_SIZE
           : previous.hasMore,
     };
+    await refreshStaleMessages(gen, new Set(items.map((m) => m.hash)));
     // Refresh details of rows already opened when their status moved on.
-    for (const item of items) {
+    for (const item of messagesState.value?.items ?? []) {
       const details = messageDetails.value[item.hash];
-      if (
-        details &&
-        (details.statusName ?? details.status) !== item.statusName
-      ) {
+      if (details && statusOf(details) !== item.statusName) {
         loadMessageDetails(item.hash);
       }
     }
@@ -291,10 +350,15 @@ const handleClearTransactions = () => {
   );
   // Messages are not stored locally: hide everything up to the newest one.
   const address = currentAddress.value;
-  const newest = Math.max(
-    ...messages.value.map((m) => new Date(m.data?.created_at).getTime()),
-  );
-  if (address && Number.isFinite(newest)) setCutoff(address, newest);
+  const newest = messages.value
+    .map((m) => m.data?.created_at as string)
+    .filter(Boolean)
+    .reduce<string | undefined>(
+      (max, value) =>
+        max === undefined || compareTimestamps(value, max) > 0 ? value : max,
+      undefined,
+    );
+  if (address && newest) setCutoff(address, newest);
 
   isClearTransactionsModalOpen.value = false;
 };
