@@ -163,8 +163,11 @@ services:
       - "${RPCHOSTPORT:-4000}:${RPCPORT:-4000}"
     expose:
       - "${RPCPORT}"
+    env_file:
+      - .env.default
+      - path: .env
+        required: false
     volumes:
-      - ./.env:/app/.env
       - ./backend:/app/backend
       - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
       # - hardhat_artifacts:/app/hardhat/artifacts
@@ -358,8 +361,11 @@ services:
       - GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS=${GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS:-210000}
       - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
       - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
+    env_file:
+      - .env.default
+      - path: .env
+        required: false
     volumes:
-      - ./.env:/app/.env
       - ./backend:/app/backend
       - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
     depends_on:

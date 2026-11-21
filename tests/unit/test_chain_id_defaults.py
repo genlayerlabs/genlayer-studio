@@ -23,7 +23,7 @@ def test_tracked_local_chain_id_defaults_stay_aligned():
         ),
         "hardhat": _decimal_capture(
             "hardhat/hardhat.config.js",
-            r'readDotenvVariable\("HARDHAT_CHAIN_ID"\)\s*\?\?\s*"(\d+)"',
+            r'readChainIdFromDotenv\(\)\s*\?\?\s*"(\d+)"',
         ),
     }
 

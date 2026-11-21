@@ -2,12 +2,12 @@ import secrets
 from typing import Callable, Awaitable
 from numpy.random import default_rng
 
-from dotenv import load_dotenv
+from backend.env_loader import load_env
 
 from backend.domain.types import LLMProvider
 import asyncio
 
-load_dotenv()
+load_env()
 rng = default_rng(secrets.randbits(128))
 
 

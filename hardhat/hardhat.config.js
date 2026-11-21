@@ -4,26 +4,12 @@ require("hardhat-deploy");
 const fs = require("node:fs");
 const path = require("node:path");
 
-function readDotenvVariable(key) {
-  try {
-    const dotenvPath = path.resolve(__dirname, "..", ".env");
-    const contents = fs.readFileSync(dotenvPath, "utf8");
-    const match = contents.match(
-      new RegExp(
-        `^\\\\s*${key}\\\\s*=\\\\s*['\\"]?(\\\\d+)['\\"]?\\\\s*(?:#.*)?$`,
-        "m"
-      )
-    );
-    return match?.[1] ?? null;
-  } catch (_) {
-    return null;
-  }
-}
+const { readChainIdFromDotenv } = require("./read-dotenv");
 
 function getChainId() {
   const raw =
     process.env.GENLAYER_CHAIN_ID ?? process.env.HARDHAT_CHAIN_ID ??
-    readDotenvVariable("GENLAYER_CHAIN_ID") ?? readDotenvVariable("HARDHAT_CHAIN_ID") ?? "61127";
+    readChainIdFromDotenv() ?? "61127";
   const chainId = Number.parseInt(raw, 10);
   if (Number.isNaN(chainId)) {
     throw new Error(
