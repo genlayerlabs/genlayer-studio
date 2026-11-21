@@ -207,20 +207,28 @@ const FINAL_MESSAGE_STATUSES = new Set(['FINALIZED', 'CANCELED']);
 const MAX_STALE_REFRESHES_PER_POLL = 10;
 
 // Polling only refreshes the newest page. Older loaded rows that can still
-// change status are re-read individually (bounded per poll).
+// change status are re-checked with a status-only request, a bounded number
+// per poll, rotating through all eligible rows so none is starved.
+let staleRotation = 0;
 async function refreshStaleMessages(gen: number, headHashes: Set<string>) {
-  const stale = (messagesState.value?.items ?? [])
-    .filter(
-      (m) =>
-        !headHashes.has(m.hash) &&
-        !FINAL_MESSAGE_STATUSES.has(String(m.statusName)),
-    )
-    .slice(0, MAX_STALE_REFRESHES_PER_POLL);
+  const eligible = (messagesState.value?.items ?? []).filter(
+    (m) =>
+      !headHashes.has(m.hash) &&
+      !FINAL_MESSAGE_STATUSES.has(String(m.statusName)),
+  );
+  if (eligible.length === 0) return;
+  const start = staleRotation % eligible.length;
+  const count = Math.min(MAX_STALE_REFRESHES_PER_POLL, eligible.length);
+  staleRotation = start + count;
+  const batch = [...eligible.slice(start), ...eligible.slice(0, start)].slice(
+    0,
+    count,
+  );
   await Promise.all(
-    stale.map(async (m) => {
+    batch.map(async (m) => {
       try {
-        const tx: any = await transactionsStore.getTransaction(m.hash as any);
-        if (gen === generation) applyStatus(m.hash, statusOf(tx));
+        const status = await rpcClient.getTransactionStatus({ hash: m.hash });
+        if (gen === generation) applyStatus(m.hash, status);
       } catch (e) {
         console.warn('Error refreshing transaction status', e);
       }

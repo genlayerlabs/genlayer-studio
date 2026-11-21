@@ -7,6 +7,7 @@ import TransactionsList from '@/components/Simulator/TransactionsList.vue';
 
 const getSentTransactions = vi.fn();
 const getTransaction = vi.fn();
+const getTransactionStatus = vi.fn();
 const clearTransactionsForContract = vi.fn();
 
 const addrA = '0xAbCd000000000000000000000000000000000001';
@@ -34,7 +35,7 @@ vi.mock('@/stores', () => ({
   useNodeStore: () => ({ searchFilter: '' }),
 }));
 vi.mock('@/hooks', () => ({
-  useRpcClient: () => ({ getSentTransactions }),
+  useRpcClient: () => ({ getSentTransactions, getTransactionStatus }),
 }));
 vi.mock('@kyvg/vue3-notification', () => ({ notify: vi.fn() }));
 vi.mock('@vueuse/core', () => ({
@@ -115,6 +116,7 @@ beforeEach(() => {
   localStorage.clear();
   getSentTransactions.mockReset();
   getTransaction.mockReset();
+  getTransactionStatus.mockReset();
   contracts.currentContractId = 'a';
   network.isStudio = true;
   txs.transactions = [];
@@ -387,10 +389,36 @@ describe('TransactionsList messages', () => {
     await loadAll(wrapper);
     expect(statuses(wrapper)[39]).toBe('PENDING');
 
-    getTransaction.mockResolvedValue({ statusName: 'FINALIZED' });
+    getTransactionStatus.mockResolvedValue('FINALIZED');
     await poll();
-    expect(getTransaction).toHaveBeenCalledTimes(1);
+    expect(getTransactionStatus).toHaveBeenCalledTimes(1);
+    expect(getTransaction).not.toHaveBeenCalled(); // no full details
     expect(statuses(wrapper)[39]).toBe('FINALIZED');
+    wrapper.unmount();
+  });
+
+  it('rotates through more nonterminal older rows than the per-poll budget', async () => {
+    vi.useFakeTimers();
+    serve(40);
+    for (let i = 0; i < 11; i++) history[i].status = 'PENDING'; // 11 oldest
+    const wrapper = mountList();
+    await flushPromises();
+    await loadAll(wrapper);
+
+    const finalized = new Set<string>();
+    getTransactionStatus.mockImplementation(async ({ hash }) => {
+      finalized.add(hash);
+      return 'FINALIZED';
+    });
+    await poll();
+    expect(getTransactionStatus).toHaveBeenCalledTimes(10);
+    await poll();
+    // The eleventh row is reached on the next poll, not starved.
+    expect(finalized.size).toBe(11);
+    expect(
+      statuses(wrapper).filter((x: string) => x === 'PENDING'),
+    ).toHaveLength(0);
+    expect(getTransaction).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
