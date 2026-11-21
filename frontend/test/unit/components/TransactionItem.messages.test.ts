@@ -147,6 +147,96 @@ describe('TransactionItem messages (triggered transactions)', () => {
     }
   });
 
+  describe('equivalence principle outputs across leader rotations', () => {
+    const node = { address: '0xabc' };
+    const round = (name: string, leader: string, address = '0xabc') => ({
+      consensus_round: name,
+      status_changes: ['PENDING'],
+      leader_result: [{ node_config: { address }, eq_outputs: { leader } }],
+    });
+    const outputsFor = async (data: any) => {
+      const wrapper = mountItem({
+        ...parentTransaction,
+        data: { ...parentTransaction.data, ...data },
+      });
+      await wrapper.trigger('click');
+      return wrapper
+        .findAll('[data-testid="eq-output-round"]')
+        .map((r) => r.find('pre').text());
+    };
+
+    it('shows archived rounds plus the active leader proposal', async () => {
+      expect(
+        await outputsFor({
+          consensus_data: {
+            leader_receipt: [
+              { node_config: node, eq_outputs: { leader: '"third"' } },
+            ],
+          },
+          consensus_history: {
+            consensus_results: [
+              round('Leader Rotation', '"first"'),
+              round('Leader Rotation', '"second"'),
+            ],
+          },
+        }),
+      ).toEqual(['first', 'second', 'third']);
+    });
+
+    it('does not repeat an archived proposal after a validator-only entry', async () => {
+      expect(
+        await outputsFor({
+          consensus_data: {
+            leader_receipt: [
+              { node_config: node, eq_outputs: { leader: '"third"' } },
+            ],
+          },
+          consensus_history: {
+            consensus_results: [
+              round('Leader Rotation', '"first"'),
+              round('Accepted', '"third"'),
+              {
+                consensus_round: 'Validator Appeal Failed',
+                status_changes: ['ACCEPTED'],
+                leader_result: null,
+              },
+            ],
+          },
+        }),
+      ).toEqual(['first', 'third']);
+    });
+
+    it('shows the proposal once after its round is archived', async () => {
+      expect(
+        await outputsFor({
+          consensus_data: {
+            leader_receipt: [
+              { node_config: node, eq_outputs: { leader: '"third"' } },
+            ],
+          },
+          consensus_history: {
+            consensus_results: [
+              round('Leader Rotation', '"first"'),
+              round('Accepted', '"third"'),
+            ],
+          },
+        }),
+      ).toEqual(['first', 'third']);
+    });
+  });
+
+  it('falls back to the current leader receipt without history', async () => {
+    const wrapper = mountItem({
+      ...parentTransaction,
+      data: {
+        ...parentTransaction.data,
+        consensus_data: { leader_receipt: [{ eq_outputs: { leader: '"x"' } }] },
+      },
+    });
+    await wrapper.trigger('click');
+    expect(wrapper.findAll('[data-testid="eq-output-round"]')).toHaveLength(1);
+  });
+
   it('lists triggered transactions as links in the details modal', async () => {
     const wrapper = mountItem();
     await wrapper.trigger('click');
