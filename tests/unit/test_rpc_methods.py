@@ -452,7 +452,11 @@ def test_sent_transactions_summary_passes_cursor_and_rejects_partial_cursor():
         )
     with pytest.raises(JSONRPCError):
         endpoints.get_sent_transactions_summary(
-            processor, accounts, "0xaddress", before_created_at="nope", before_hash="0x1"
+            processor,
+            accounts,
+            "0xaddress",
+            before_created_at="nope",
+            before_hash="0x1",
         )
 
 

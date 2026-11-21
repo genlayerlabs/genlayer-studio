@@ -3563,9 +3563,7 @@ def get_sent_transactions_summary(
                 code=-32602,
                 message="before_created_at and before_hash must be given together",
             )
-    return transactions_processor.get_sent_transactions_summary(
-        address, limit, before
-    )
+    return transactions_processor.get_sent_transactions_summary(address, limit, before)
 
 
 @check_forbidden_method_in_hosted_studio

@@ -1821,14 +1821,14 @@ class TransactionsProcessor:
         except Exception:
             pass
         query = self.session.query(
-                Transactions.hash,
-                Transactions.from_address,
-                Transactions.to_address,
-                Transactions.type,
-                Transactions.status,
-                Transactions.created_at,
-                Transactions.triggered_by_hash,
-                Transactions.data["calldata"].as_string().label("calldata"),
+            Transactions.hash,
+            Transactions.from_address,
+            Transactions.to_address,
+            Transactions.type,
+            Transactions.status,
+            Transactions.created_at,
+            Transactions.triggered_by_hash,
+            Transactions.data["calldata"].as_string().label("calldata"),
         ).filter(Transactions.from_address == address)
         if before is not None:
             before_created_at, before_hash = before
