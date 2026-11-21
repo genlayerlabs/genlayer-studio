@@ -183,6 +183,29 @@ describe('TransactionItem messages (triggered transactions)', () => {
       ).toEqual(['first', 'second', 'third']);
     });
 
+    it('does not repeat an archived proposal after a validator-only entry', async () => {
+      expect(
+        await outputsFor({
+          consensus_data: {
+            leader_receipt: [
+              { node_config: node, eq_outputs: { leader: '"third"' } },
+            ],
+          },
+          consensus_history: {
+            consensus_results: [
+              round('Leader Rotation', '"first"'),
+              round('Accepted', '"third"'),
+              {
+                consensus_round: 'Validator Appeal Failed',
+                status_changes: ['ACCEPTED'],
+                leader_result: null,
+              },
+            ],
+          },
+        }),
+      ).toEqual(['first', 'third']);
+    });
+
     it('shows the proposal once after its round is archived', async () => {
       expect(
         await outputsFor({

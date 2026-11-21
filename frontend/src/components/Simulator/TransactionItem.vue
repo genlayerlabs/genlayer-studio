@@ -643,8 +643,14 @@ const eqOutputRounds = computed(() => {
   // The active leader's proposal lives in consensus_data until its round is
   // archived; show it after the archived ones, and only once it is archived.
   const current = leaderReceipt.value;
-  const last = Array.isArray(results) ? results[results.length - 1] : null;
-  const archived = asRecord(last?.leader_result?.[0]);
+  // Validator-only entries (e.g. a failed appeal) have no leader_result, so
+  // compare against the latest entry that actually holds a leader proposal.
+  const archived = Array.isArray(results)
+    ? ([...results]
+        .reverse()
+        .map((entry: any) => asRecord(entry?.leader_result?.[0]))
+        .find((receipt) => receipt !== null) ?? null)
+    : null;
   const alreadyArchived =
     archived !== null &&
     JSON.stringify(archived.eq_outputs ?? null) ===
