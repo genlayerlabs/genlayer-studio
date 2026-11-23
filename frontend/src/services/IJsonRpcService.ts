@@ -11,6 +11,7 @@ import type {
   GetContractSchemaRequest,
   GetTransactionCountRequest,
   StudioFeeConfig,
+  StudioFeesDistribution,
   StudioFeeEstimateResult,
 } from '@/types';
 
@@ -32,6 +33,7 @@ export interface IJsonRpcService {
   getValidators(): Promise<any[]>;
   getProvidersAndModels(): Promise<any[]>;
   getFeeConfig(): Promise<StudioFeeConfig>;
+  calculateRoundFees(distribution: StudioFeesDistribution): Promise<string>;
   addProvider(request: AddProviderRequest): Promise<any>;
   updateProvider(request: UpdateProviderRequest): Promise<any>;
   deleteProvider(request: DeleteProviderRequest): Promise<any>;

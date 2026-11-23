@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ref } from 'vue';
+import type { FeeSettings } from '@/utils/consensusFees';
 import { JsonRpcServiceError } from '@/services/JsonRpcService';
 
 const mockDeployContract = vi.fn(() => Promise.resolve('0xDeployHash'));
@@ -85,7 +86,9 @@ const mockRpcEstimateTransactionFees = vi.fn(() =>
 );
 const mockRpcSimulateCall = vi.fn(() => Promise.resolve({ status: 'ok' }));
 const mockRpcGetFeeConfig = vi.fn();
+const mockCalculateRoundFees = vi.fn().mockResolvedValue('123');
 const mockRpcClient = {
+  calculateRoundFees: mockCalculateRoundFees,
   estimateTransactionFees: mockRpcEstimateTransactionFees,
   simulateCall: mockRpcSimulateCall,
   getFeeConfig: mockRpcGetFeeConfig,
@@ -116,7 +119,16 @@ const mockAccountsStore = {
   },
 };
 
+const defaultFeeSettings: FeeSettings = {
+  leaderTimeunitsAllocation: '',
+  validatorTimeunitsAllocation: '',
+  appealRounds: '',
+  rotations: '',
+};
+const mockConsensusStore = { feeSettings: defaultFeeSettings };
+
 vi.mock('@/stores', () => ({
+  useConsensusStore: () => mockConsensusStore,
   useContractsStore: vi.fn(() => mockContractsStore),
   useTransactionsStore: vi.fn(() => mockTransactionsStore),
   useAccountsStore: vi.fn(() => mockAccountsStore),
@@ -169,6 +181,7 @@ vi.mock('@vueuse/core', () => ({
 describe('useContractQueries — behavioral contract', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockConsensusStore.feeSettings = defaultFeeSettings;
     mockNetworkStore.isStudio = false;
     mockNetworkStore.rpcUrl = 'http://127.0.0.1:4000/api';
     mockGenlayerClient.estimateTransactionFees = mockEstimateTransactionFees;
@@ -190,6 +203,82 @@ describe('useContractQueries — behavioral contract', () => {
         feeValue: '600000000000000000',
       },
     });
+  });
+
+  it('uses the same saved fee settings to estimate and submit deployments and writes', async () => {
+    mockNetworkStore.isStudio = true;
+    mockConsensusStore.feeSettings = {
+      leaderTimeunitsAllocation: '120',
+      validatorTimeunitsAllocation: '140',
+      appealRounds: '2',
+      rotations: '0, 1, 2',
+    };
+    const overrides = {
+      leaderTimeunitsAllocation: '120',
+      validatorTimeunitsAllocation: '140',
+      appealRounds: '2',
+      rotations: ['0', '1', '2'],
+    };
+    const estimate = await mockRpcEstimateTransactionFees();
+    mockRpcEstimateTransactionFees.mockClear();
+    const fees = {
+      ...estimate.recommendedPreset,
+      distribution: {
+        ...estimate.recommendedPreset.distribution,
+        ...overrides,
+      },
+    };
+    mockRpcEstimateTransactionFees
+      .mockResolvedValueOnce({ ...estimate, recommendedPreset: fees })
+      .mockResolvedValueOnce({ ...estimate, recommendedPreset: fees });
+    const { useContractQueries } = await import('@/hooks/useContractQueries');
+    const { deployContract, callWriteMethod } = useContractQueries();
+    const args = { args: [], kwargs: {} };
+
+    await deployContract(args, 'NORMAL', 3);
+    await callWriteMethod({ method: 'tip', args, executionMode: 'NORMAL' });
+
+    for (const scenarioName of ['deploy', 'tip']) {
+      expect(mockRpcEstimateTransactionFees).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scenarioName,
+          fees: { distribution: expect.objectContaining(overrides) },
+        }),
+      );
+    }
+    expect(mockDeployContract).toHaveBeenCalledWith(
+      expect.objectContaining({ fees }),
+    );
+    expect(mockWriteContract).toHaveBeenCalledWith(
+      expect.objectContaining({ fees }),
+    );
+  });
+
+  it('quotes the configured distribution when Studio execution fails during estimation', async () => {
+    mockNetworkStore.isStudio = true;
+    mockConsensusStore.feeSettings = {
+      ...defaultFeeSettings,
+      appealRounds: '1',
+    };
+    mockRpcEstimateTransactionFees.mockRejectedValueOnce(
+      new JsonRpcServiceError('execution failed', -32000),
+    );
+    const { useContractQueries } = await import('@/hooks/useContractQueries');
+    const { callWriteMethod } = useContractQueries();
+    await callWriteMethod({
+      method: 'fail',
+      args: { args: [], kwargs: {} },
+      executionMode: 'NORMAL',
+    });
+
+    const distribution = expect.objectContaining({
+      appealRounds: '1',
+      rotations: ['0', '0'],
+    });
+    expect(mockCalculateRoundFees).toHaveBeenCalledWith(distribution);
+    expect(mockWriteContract).toHaveBeenCalledWith(
+      expect.objectContaining({ fees: { distribution, feeValue: 123n } }),
+    );
   });
 
   describe('deployContract', () => {
