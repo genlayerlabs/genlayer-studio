@@ -104,13 +104,12 @@ class TestLlmErc20:
             return value
 
         # direct_deploy loads the GenVM SDK; `genlayer` is importable only after
-        # the first deploy, so deploy both contracts before importing it.
-        contracts = [
-            direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000) for _ in range(2)
-        ]
+        # the deploy. Only one contract may be deployed per test, so reuse it:
+        # the mocked answers are absolute, so the second transfer needs no reset.
+        contract = direct_deploy(str(EXAMPLES_DIR / "llm_erc20.py"), 1000)
         import genlayer as gl
 
-        for contract, answer in zip(contracts, (compact, reformatted)):
+        for answer in (compact, reformatted):
             with mock.patch.object(
                 gl.nondet, "exec_prompt", return_value=answer
             ), mock.patch.object(gl.eq_principle, "strict_eq", capture_strict_eq):
