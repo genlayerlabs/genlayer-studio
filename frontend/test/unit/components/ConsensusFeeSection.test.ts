@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ConsensusFeeSection from '@/components/Simulator/settings/ConsensusFeeSection.vue';
 import { loadFeeSettings, saveFeeSettings } from '@/utils/consensusFees';
 
+let fail = false;
 const policy = {
   minProposeTimeunits: '30',
   maxProposeTimeunits: '600',
@@ -10,7 +11,12 @@ const policy = {
   maxCommitTimeunits: '600',
 };
 vi.mock('@/hooks', () => ({
-  useRpcClient: () => ({ getFeeConfig: async () => ({ policy }) }),
+  useRpcClient: () => ({
+    getFeeConfig: async () => {
+      if (fail) throw new Error('down');
+      return { policy };
+    },
+  }),
 }));
 
 vi.mock('@/stores', () => ({
@@ -23,6 +29,7 @@ vi.mock('@/stores', () => ({
 describe('ConsensusFeeSection', () => {
   beforeEach(() => {
     localStorage.clear();
+    fail = false;
     vi.unstubAllEnvs();
   });
 
@@ -104,5 +111,22 @@ describe('ConsensusFeeSection', () => {
     const loaded = loadFeeSettings();
     expect(loaded.appealRounds).toBe('');
     expect(loaded.rotations).toBe('');
+  });
+
+  it('does not save timeouts while the policy is unavailable', async () => {
+    fail = true;
+    const settings = mount(ConsensusFeeSection, {
+      global: { stubs: ['Loader'] },
+    });
+    await new Promise((r) => setTimeout(r));
+    await settings.findAll('input')[0].setValue('1');
+    await settings.get('form').trigger('submit');
+    await new Promise((r) => setTimeout(r));
+    fail = false;
+    expect(settings.get('[role="alert"]').text()).toContain(
+      'Could not load the fee policy',
+    );
+    expect(settings.find('[role="status"]').exists()).toBe(false);
+    expect(loadFeeSettings().leaderTimeunitsAllocation).toBe('');
   });
 });

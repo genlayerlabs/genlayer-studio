@@ -237,7 +237,9 @@ export function useContractQueries() {
       | StudioFeeConfig['defaultFees']['distribution']
       | undefined;
     if (hasOverrides) {
-      const config = studioFeeConfig.value ?? (await rpcClient.getFeeConfig());
+      // Always read the current policy: the server may change its bounds
+      // without the RPC URL changing.
+      const config = await rpcClient.getFeeConfig();
       studioFeeConfig.value = config;
       if (!config.enabled) return undefined;
       // Ignore overrides the active policy rejects instead of failing every

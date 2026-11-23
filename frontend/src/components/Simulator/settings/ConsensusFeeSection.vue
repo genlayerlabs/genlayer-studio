@@ -19,16 +19,27 @@ const error = ref('');
 const saved = ref(false);
 const policy = ref<FeePolicy>();
 
-onMounted(async () => {
+async function loadPolicy() {
   try {
     policy.value = (await useRpcClient().getFeeConfig()).policy;
+    return true;
   } catch {
-    // Without the active policy the backend still validates on submission.
+    return false;
   }
-});
+}
 
-function save() {
+onMounted(loadPolicy);
+
+async function save() {
   saved.value = false;
+  const hasTimeout =
+    settings.leaderTimeunitsAllocation.trim() ||
+    settings.validatorTimeunitsAllocation.trim();
+  if (hasTimeout && !policy.value && !(await loadPolicy())) {
+    error.value =
+      'Could not load the fee policy from Studio, so timeouts cannot be validated. Try again once Studio is reachable.';
+    return;
+  }
   for (const field of Object.keys(feeFields) as (keyof typeof feeFields)[]) {
     if (!isValidFeeSetting(field, settings[field])) {
       error.value = `Enter a valid value for ${feeFields[field]}.`;
