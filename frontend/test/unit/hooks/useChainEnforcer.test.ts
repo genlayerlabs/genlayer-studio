@@ -38,6 +38,7 @@ vi.mock('@/utils/runtimeConfig', () => ({
 import {
   useChainEnforcer,
   chainMismatchMessage,
+  ChainMismatchError,
 } from '@/hooks/useChainEnforcer';
 
 const STUDIO_HEX = '0xf22f'; // 61999
@@ -173,11 +174,16 @@ describe('useChainEnforcer.ensureCorrectChain', () => {
     ).rejects.toThrow(chainMismatchMessage(61999, 4221, 'Bradbury'));
   });
 
-  it('propagates unexpected wallet errors unchanged', async () => {
+  it('explains the mismatch and keeps the wallet error as cause on unexpected failures', async () => {
     const err = rpcError(-32603, 'internal');
     walletOn(MAINNET_HEX, () => {
       throw err;
     });
-    await expect(useChainEnforcer().ensureCorrectChain()).rejects.toBe(err);
+    const result = await useChainEnforcer()
+      .ensureCorrectChain()
+      .catch((e) => e);
+    expect(result).toBeInstanceOf(ChainMismatchError);
+    expect(result.message).toContain('chain ID 1');
+    expect(result.cause).toBe(err);
   });
 });

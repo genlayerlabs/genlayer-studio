@@ -19,7 +19,11 @@ const toHex = (n: number) => `0x${n.toString(16)}`;
 /** Minimal EIP-1193 provider simulating a MetaMask-like wallet. */
 function createWallet(
   initialChainId: number,
-  behaviour: { rejectSwitch?: boolean; knownChains?: number[] } = {},
+  behaviour: {
+    rejectSwitch?: boolean;
+    failAdd?: boolean;
+    knownChains?: number[];
+  } = {},
 ) {
   let chainId = initialChainId;
   const known = new Set(behaviour.knownChains ?? [initialChainId]);
@@ -44,6 +48,11 @@ function createWallet(
           return null;
         }
         case 'wallet_addEthereumChain': {
+          if (behaviour.failAdd) {
+            throw Object.assign(new Error('Internal JSON-RPC error.'), {
+              code: -32603,
+            });
+          }
           const target = parseInt(params![0].chainId, 16);
           known.add(target);
           chainId = target;
@@ -196,6 +205,29 @@ describe('wallet chain enforcement — provider → enforcer → tx → notifica
       const shown = vi.mocked(notify).mock.calls[0][0] as { text: string };
       expect(shown.text).toContain(`chain ID ${WRONG_CHAIN_ID}`);
       expect(shown.text).toContain(`chain ID ${STUDIO_CHAIN_ID}`);
+    });
+
+    it('keeps the chain explanation when the wallet fails to add the network', async () => {
+      const wallet = createWallet(WRONG_CHAIN_ID, { failAdd: true });
+      mockWalletProvider.value = wallet;
+      const { deployContract } = useContractQueries();
+
+      const error = await deployContract(
+        { args: [], kwargs: {} },
+        'NORMAL' as any,
+        3,
+      ).catch((e) => e);
+
+      expect(error.message).toBe(EXPECTED_MESSAGE);
+      expect((error as Error).cause).toMatchObject({ code: -32603 });
+      expect(wallet.currentChainId()).toBe(WRONG_CHAIN_ID);
+      expect(mockDeployContract).not.toHaveBeenCalled();
+      expect(mockTransactionsStore.addTransaction).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledWith({
+        type: 'error',
+        title: 'Error deploying contract',
+        text: EXPECTED_MESSAGE,
+      });
     });
 
     it('switches the wallet to the expected chain and then deploys', async () => {

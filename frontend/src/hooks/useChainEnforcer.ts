@@ -6,8 +6,8 @@ import { useWallet } from './useWallet';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 export class ChainMismatchError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'ChainMismatchError';
   }
 }
@@ -108,19 +108,18 @@ export function useChainEnforcer() {
             ],
           });
         } catch (addError: any) {
-          if (addError?.code === 4001) {
-            throw new ChainMismatchError(
-              chainMismatchMessage(currentChainId, targetChainId, chainName),
-            );
-          }
-          throw addError;
+          throw new ChainMismatchError(
+            chainMismatchMessage(currentChainId, targetChainId, chainName),
+            { cause: addError },
+          );
         }
-      } else if (switchError?.code === 4001) {
+      } else {
+        // User rejection (4001) or any other wallet failure: the wallet is
+        // still on the wrong chain, so explain that and keep the cause.
         throw new ChainMismatchError(
           chainMismatchMessage(currentChainId, targetChainId, chainName),
+          { cause: switchError },
         );
-      } else {
-        throw switchError;
       }
     }
 
