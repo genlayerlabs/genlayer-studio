@@ -36,7 +36,7 @@ Have ideas for new features or use cases? We're eager to hear them! But first:
 - **1.3. Setup the Studio locally**: launch the Studio's frontend and backend by running the docker compose command (Please note that you must have docker, node, and npm installed)
 
    ```sh
-   $ docker compose up   # defaults come from the tracked .env.default; put overrides in an optional .env
+   $ scripts/compose.sh up   # layers the tracked .env.default and your optional .env overrides
    ```
 
    When building GenVM from source, install Nix locally and configure

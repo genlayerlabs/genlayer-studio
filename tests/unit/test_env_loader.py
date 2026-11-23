@@ -200,7 +200,7 @@ def test_ci_compose_entry_point_gets_every_tracked_default(tmp_path):
     assert unset.isdisjoint(tracked), unset & tracked
 
 
-def _wrapper_config(tmp_path, env_text):
+def _wrapper_config(tmp_path, env_text, files=("-f", "docker-compose.yml")):
     import os
     import shutil
     import subprocess
@@ -224,7 +224,7 @@ def _wrapper_config(tmp_path, env_text):
     if env_text is not None:
         (tmp_path / ".env").write_text(env_text)
     return subprocess.run(
-        ["bash", "scripts/compose.sh", "-f", "docker-compose.yml", "config"],
+        ["bash", "scripts/compose.sh", *files, "config"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -241,3 +241,13 @@ def test_wrapper_explicit_file_with_partial_env_and_cross_reference(tmp_path):
     out = _wrapper_config(tmp_path, "HOSTPORT=${DEBUGPORT}\n")
     assert "PW: postgres" in out
     assert 'published: "4678"' in out
+
+
+def test_documented_command_resolves_cross_file_override(tmp_path):
+    """`scripts/compose.sh config` (no -f) uses compose.yaml and both layers."""
+    import shutil
+
+    shutil.copy(ROOT_DIR / "compose.yaml", tmp_path / "compose.yaml")
+    out = _wrapper_config(tmp_path, "HOSTPORT=${DEBUGPORT}\n", files=())
+    assert 'published: "4678"' in out
+    assert "PW: postgres" in out

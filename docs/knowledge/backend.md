@@ -206,7 +206,7 @@ Database: PostgreSQL (shared by all workers and RPC instances)
     - `JSONRPC_REPLICAS` (default: 1) - Number of RPC instances (minimum: 1).
   - Workers: `WORKER_ID`, `WORKER_POLL_INTERVAL`, `TRANSACTION_TIMEOUT_MINUTES`.
 - Commands (see repo guidelines):
-  - Full stack: `docker compose up` (defaults in `.env.default`; optional overrides in `.env`) (add `-d` for background).
+  - Full stack: `scripts/compose.sh up` (defaults in `.env.default`; optional overrides in `.env`, which may reference default keys; plain `docker compose up` does not resolve such references) (add `-d` for background).
   - Backend services only: `docker compose up jsonrpc webrequest ollama database-migration postgres`.
   - Frontend dev: `cd frontend && npm install && npm run dev`.
   - Python tests: `pytest` (use `-k`/`-m` for filters).
