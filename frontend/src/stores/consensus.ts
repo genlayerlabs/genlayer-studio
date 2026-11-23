@@ -3,6 +3,11 @@ import { ref } from 'vue';
 import { useRpcClient, useWebSocketClient } from '@/hooks';
 import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 import { useNetworkStore } from '@/stores/network';
+import {
+  loadFeeSettings,
+  saveFeeSettings,
+  type FeeSettings,
+} from '@/utils/consensusFees';
 
 export const useConsensusStore = defineStore('consensusStore', () => {
   const rpcClient = useRpcClient();
@@ -13,6 +18,12 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   );
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(getRuntimeConfigNumber('VITE_MAX_ROTATIONS', 3));
+  const feeSettings = ref(loadFeeSettings());
+
+  function setFeeSettings(settings: FeeSettings) {
+    feeSettings.value = settings;
+    return saveFeeSettings(settings);
+  }
 
   // Track initialization state to prevent duplicate loading state changes
   let hasInitialized = false;
@@ -94,6 +105,8 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   }
 
   return {
+    feeSettings,
+    setFeeSettings,
     finalityWindow,
     setFinalityWindowTime,
     fetchFinalityWindowTime,

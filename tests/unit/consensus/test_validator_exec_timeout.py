@@ -1,14 +1,26 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.consensus.base import CommittingState
+from backend.consensus import base as consensus
+from backend.consensus.base import (
+    CommittingState,
+    LeaderTimeoutState,
+    ProposingState,
+    RevealingState,
+)
+from backend.consensus.effects import (
+    SetTransactionResultEffect,
+    UpdateConsensusHistoryEffect,
+)
 from backend.database_handler.types import ConsensusData
+from backend.domain.types import TransactionExecutionMode
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.types import ExecutionMode, ExecutionResultStatus, Receipt, Vote
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 
 class _MessageHandler:
@@ -36,12 +48,120 @@ def _snapshot_node(address: str) -> SimpleNamespace:
     return SimpleNamespace(validator=validator)
 
 
+@pytest.fixture
+def receipt_round(monkeypatch):
+    executor = MagicMock(execute=AsyncMock())
+    monkeypatch.setattr(consensus, "EffectExecutor", MagicMock(return_value=executor))
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            hash="tx-hash",
+            data={},
+            execution_mode="NORMAL",
+            consensus_history={},
+            config_rotation_rounds=1,
+            appealed=False,
+            appeal_validators_timeout=False,
+            appeal_leader_timeout=False,
+            appeal_undetermined=False,
+            appeal_failed=0,
+        ),
+        consensus_data=ConsensusData(votes={}, leader_receipt=[], validators=[]),
+        votes={},
+        rotation_count=0,
+        active_fee_round=0,
+        transactions_processor=MagicMock(),
+        consensus_service=MagicMock(),
+        msg_handler=_MessageHandler(),
+        validators_snapshot=SimpleNamespace(nodes=[]),
+        remaining_validators=[],
+    )
+    context.transactions_processor.get_transaction_by_hash.return_value = {
+        "consensus_history": {}
+    }
+    return context, executor
+
+
+@pytest.mark.asyncio
+async def test_rotation_replaces_leader_receipt_pair(receipt_round, monkeypatch):
+    context, executor = receipt_round
+    old_execution = _make_receipt("old-leader", Vote.DISAGREE)
+    old_execution.mode = ExecutionMode.LEADER
+    old_validation = _make_receipt("old-leader", Vote.DISAGREE)
+    context.consensus_data.leader_receipt = [old_execution]
+    context.validation_results = [old_validation]
+    monkeypatch.setattr(
+        consensus.ConsensusAlgorithm,
+        "add_new_validator",
+        MagicMock(return_value=[{"address": "new-leader"}]),
+    )
+
+    proposing = await RevealingState().handle(context)
+    assert isinstance(proposing, ProposingState)
+    history_effect = next(
+        effect
+        for effect in executor.execute.await_args.args[0]
+        if isinstance(effect, UpdateConsensusHistoryEffect)
+    )
+    assert history_effect.leader_receipt == [old_execution, old_validation]
+
+    execution = _make_receipt("new-leader", Vote.AGREE)
+    execution.mode = ExecutionMode.LEADER
+    validation = _make_receipt("new-leader", Vote.AGREE)
+    context.contract_snapshot = MagicMock()
+    context.contract_snapshot_factory = MagicMock()
+    context.genvm_manager = MagicMock()
+    context.shared_decoded_value_cache = {}
+    context.shared_contract_snapshot_cache = {}
+    context.node_factory = MagicMock(
+        return_value=SimpleNamespace(exec_transaction=AsyncMock(return_value=execution))
+    )
+    await proposing.handle(context)
+    assert context.consensus_data.leader_receipt == [execution]
+
+    context.validation_results = [validation]
+    await RevealingState().handle(context)
+    assert context.consensus_data.leader_receipt == [execution, validation]
+    assert history_effect.leader_receipt == [old_execution, old_validation]
+
+
+@pytest.mark.asyncio
+async def test_validator_appeal_keeps_original_leader_receipt_pair(receipt_round):
+    context, executor = receipt_round
+    execution = _make_receipt("leader", Vote.AGREE)
+    execution.mode = ExecutionMode.LEADER
+    validation = _make_receipt("leader", Vote.AGREE)
+    jury_receipt = _make_receipt("appeal-juror", Vote.DISAGREE)
+    context.transaction.appealed = True
+    context.transaction.consensus_data = ConsensusData(
+        votes={"leader": Vote.AGREE.value},
+        leader_receipt=[execution, validation],
+        validators=[],
+    )
+    context.consensus_data.leader_receipt = (
+        context.transaction.consensus_data.leader_receipt
+    )
+    context.validation_results = [jury_receipt]
+
+    await RevealingState().handle(context)
+
+    result_effect = next(
+        effect
+        for effect in executor.execute.await_args.args[0]
+        if isinstance(effect, SetTransactionResultEffect)
+    )
+    assert result_effect.consensus_data_dict["leader_receipt"] == [
+        execution.to_dict(strip_contract_state=True),
+        validation.to_dict(strip_contract_state=True),
+    ]
+    assert context.consensus_data.validators == [jury_receipt]
+
+
 @pytest.mark.asyncio
 async def test_committing_times_out_hung_validator_without_blocking(monkeypatch):
     """Outer slot timeout now produces a terminal TIMEOUT vote, not fatal IDLE."""
     monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "0.05")
 
-    transaction = SimpleNamespace(hash="tx-hash")
+    transaction = SimpleNamespace(hash="tx-hash", data=None)
 
     tx_processor = MagicMock()
     tx_processor.add_state_timestamp = MagicMock()
@@ -145,7 +265,7 @@ def _make_context(
     tx_processor.set_transaction_timestamp_last_vote = MagicMock()
 
     return SimpleNamespace(
-        transaction=SimpleNamespace(hash="tx-hash"),
+        transaction=SimpleNamespace(hash="tx-hash", data=None),
         transactions_processor=tx_processor,
         msg_handler=_MessageHandler(),
         consensus_service=MagicMock(),
@@ -166,6 +286,56 @@ def _make_context(
         remaining_validators=[{"address": address} for address in validators],
         consensus_data=ConsensusData(votes={}, leader_receipt=None, validators=[]),
         validation_results=[],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["leader", "validator"])
+async def test_consensus_state_times_out_at_funded_allocation(monkeypatch, role):
+    monkeypatch.setenv("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS", "1")
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def exec_hung(_transaction):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(exec_transaction=exec_hung),
+    )
+    context.transaction.data = {
+        FEE_ACCOUNTING_KEY: {
+            "fees_distribution": {
+                "leaderTimeunitsAllocation": 1 if role == "leader" else 4,
+                "validatorTimeunitsAllocation": 1 if role == "validator" else 4,
+            }
+        }
+    }
+    if role == "leader":
+        context.involved_validators = [context.leader]
+        context.transaction.execution_mode = TransactionExecutionMode.NORMAL
+        context.transaction.appeal_leader_timeout = False
+        next_state = await asyncio.wait_for(ProposingState().handle(context), 3)
+        assert isinstance(next_state, LeaderTimeoutState)
+        [receipt] = context.consensus_data.leader_receipt
+    else:
+        await asyncio.wait_for(CommittingState().handle(context), 3)
+        [receipt] = context.validation_results
+        assert receipt.vote == Vote.TIMEOUT
+
+    assert started.is_set()
+    assert cancelled.is_set()
+    assert receipt.processing_time == 1000
+    assert (
+        receipt.genvm_result["error_code"] == f"CONSENSUS_{role.upper()}_EXEC_TIMEOUT"
     )
 
 

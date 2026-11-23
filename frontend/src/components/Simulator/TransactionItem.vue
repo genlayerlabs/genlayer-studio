@@ -325,7 +325,7 @@ function toBigIntAmount(value: unknown): bigint | null {
 
 function formatNumber(value: unknown): string {
   const amount = toBigIntAmount(value);
-  return amount === null ? '-' : amount.toLocaleString();
+  return amount === null ? '-' : amount.toLocaleString('en-US');
 }
 
 function formatGenFromWei(wei: bigint): string {
@@ -336,12 +336,12 @@ function formatGenFromWei(wei: bigint): string {
   const remainder = absWei % weiPerGen;
   const sign = negative ? '-' : '';
 
-  if (remainder === 0n) return `${sign}${whole.toLocaleString()}`;
+  if (remainder === 0n) return `${sign}${whole.toLocaleString('en-US')}`;
 
   const fraction = remainder.toString().padStart(18, '0');
   const trimmed = trimTrailingZeroes(fraction);
   const decimals = Math.min(6, Math.max(3, trimmed.length));
-  return `${sign}${whole.toLocaleString()}.${fraction.slice(0, decimals)}`;
+  return `${sign}${whole.toLocaleString('en-US')}.${fraction.slice(0, decimals)}`;
 }
 
 function trimTrailingZeroes(value: string): string {
@@ -356,7 +356,7 @@ function formatFeeAmount(value: unknown): string {
   const amount = toBigIntAmount(value);
   if (amount === null) return '-';
 
-  const raw = `${amount.toLocaleString()} wei`;
+  const raw = `${amount.toLocaleString('en-US')} wei`;
   const absAmount = amount < 0n ? -amount : amount;
   if (absAmount < 1_000_000_000_000n) return raw;
 
@@ -603,26 +603,70 @@ const reportedMessages = computed<StudioExecutionFeeReportMessage[]>(() => {
   return feeReport.value?.messageReveal?.messages ?? [];
 });
 
-const eqOutputs = computed(() => {
-  const outputs = leaderReceipt.value?.eq_outputs || {};
-  return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
-    const decodedResult = resultToUserFriendlyJson(value);
-    const parsedValue = decodedResult?.payload?.readable ?? value;
-    try {
-      if (typeof parsedValue === 'string') {
-        return {
-          key,
-          value: JSON.parse(parsedValue),
-        };
+function decodeEqOutputs(outputs: unknown) {
+  return Object.entries(asRecord(outputs) || {}).map(
+    ([key, value]: [string, unknown]) => {
+      const decodedResult = resultToUserFriendlyJson(value);
+      const parsedValue = decodedResult?.payload?.readable ?? value;
+      try {
+        if (typeof parsedValue === 'string') {
+          return { key, value: JSON.parse(parsedValue) };
+        }
+      } catch (e) {
+        console.error('Error parsing JSON:', e);
       }
-    } catch (e) {
-      console.error('Error parsing JSON:', e);
+      return { key, value: parsedValue };
+    },
+  );
+}
+
+// One entry per round that produced equivalence principle outputs. A leader
+// rotation starts a new round with a new leader receipt, so every round of the
+// consensus history is listed, not only the current leader receipt.
+const eqOutputRounds = computed(() => {
+  const results = props.transaction?.data?.consensus_history?.consensus_results;
+  const rounds: {
+    label: string;
+    outputs: ReturnType<typeof decodeEqOutputs>;
+  }[] = [];
+  if (Array.isArray(results)) {
+    results.forEach((entry: any, index: number) => {
+      const outputs = decodeEqOutputs(entry?.leader_result?.[0]?.eq_outputs);
+      if (outputs.length > 0) {
+        rounds.push({
+          label: entry?.consensus_round || `Consensus Round ${index + 1}`,
+          outputs,
+        });
+      }
+    });
+  }
+  // The active leader's proposal lives in consensus_data until its round is
+  // archived; show it after the archived ones, and only once it is archived.
+  const current = leaderReceipt.value;
+  // Validator-only entries (e.g. a failed appeal) have no leader_result, so
+  // compare against the latest entry that actually holds a leader proposal.
+  const archived = Array.isArray(results)
+    ? ([...results]
+        .reverse()
+        .map((entry: any) => asRecord(entry?.leader_result?.[0]))
+        .find((receipt) => receipt !== null) ?? null)
+    : null;
+  const alreadyArchived =
+    archived !== null &&
+    JSON.stringify(archived.eq_outputs ?? null) ===
+      JSON.stringify(current?.eq_outputs ?? null) &&
+    JSON.stringify(archived.node_config?.address ?? null) ===
+      JSON.stringify(current?.node_config?.address ?? null);
+  if (!alreadyArchived) {
+    const outputs = decodeEqOutputs(current?.eq_outputs);
+    if (outputs.length > 0) {
+      rounds.push({
+        label: rounds.length > 0 ? 'Current Round' : '',
+        outputs,
+      });
     }
-    return {
-      key,
-      value: parsedValue,
-    };
-  });
+  }
+  return rounds;
 });
 
 const shortHash = computed(() => {
@@ -752,73 +796,65 @@ const handleCancelTransaction = async () => {
   }
 };
 
-function prettifyTxData(x: any): any {
-  const oldResult = x?.consensus_data?.leader_receipt?.[0].result;
-
-  if (oldResult) {
-    try {
-      x.consensus_data.leader_receipt[0].result =
-        resultToUserFriendlyJson(oldResult);
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldCalldata = x?.consensus_data?.leader_receipt?.[0].calldata;
-
-  if (oldCalldata) {
-    try {
-      x.consensus_data.leader_receipt[0].calldata = {
-        base64: oldCalldata,
-        ...calldataToUserFriendlyJson(b64ToArray(oldCalldata)),
-      };
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldDataCalldata = x?.data?.calldata;
-
-  if (oldDataCalldata) {
-    try {
-      x.data.calldata = {
-        base64: oldDataCalldata,
-        ...calldataToUserFriendlyJson(b64ToArray(oldDataCalldata)),
-      };
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  const oldEqOutputs = x?.consensus_data?.leader_receipt?.[0].eq_outputs;
-  if (oldEqOutputs == undefined) {
-    return x;
-  }
+function prettifyReceipt(receipt: Record<string, any>) {
+  const formatted = { ...receipt };
   try {
-    const newEqOutputs = Object.fromEntries(
-      Object.entries(oldEqOutputs).map(([k, v]) => {
-        const val = resultToUserFriendlyJson(v);
-        return [k, val];
-      }),
-    );
-    const ret = {
-      ...x,
-      consensus_data: {
-        ...x.consensus_data,
-        leader_receipt: [
-          {
-            ...x.consensus_data.leader_receipt[0],
-            eq_outputs: newEqOutputs,
-          },
-          x.consensus_data.leader_receipt[1],
-        ],
-      },
-    };
-    return ret;
-  } catch (e) {
-    console.log(e);
-    return x;
+    if (typeof receipt.result === 'string') {
+      formatted.result = resultToUserFriendlyJson(receipt.result);
+    }
+    if (typeof receipt.calldata === 'string' && receipt.calldata) {
+      formatted.calldata = {
+        base64: receipt.calldata,
+        ...calldataToUserFriendlyJson(b64ToArray(receipt.calldata)),
+      };
+    }
+    if (receipt.eq_outputs) {
+      formatted.eq_outputs = Object.fromEntries(
+        Object.entries(receipt.eq_outputs).map(([key, value]) => [
+          key,
+          typeof value === 'string' ? resultToUserFriendlyJson(value) : value,
+        ]),
+      );
+    }
+  } catch (error) {
+    console.log(error);
   }
+  return formatted;
+}
+
+function prettifyTxData(x: any): any {
+  const formatted = { ...x };
+  if (x.consensus_data?.leader_receipt?.[0]) {
+    const [executionReceipt, ...otherReceipts] =
+      x.consensus_data.leader_receipt;
+    formatted.consensus_data = {
+      ...x.consensus_data,
+      leader_receipt: [prettifyReceipt(executionReceipt), ...otherReceipts],
+    };
+  }
+  if (x.studio_data?.leader_validation_receipt) {
+    formatted.studio_data = {
+      ...x.studio_data,
+      leader_validation_receipt: prettifyReceipt(
+        x.studio_data.leader_validation_receipt,
+      ),
+    };
+  }
+  const calldata = x.data?.calldata;
+  if (typeof calldata === 'string' && calldata) {
+    try {
+      formatted.data = {
+        ...x.data,
+        calldata: {
+          base64: calldata,
+          ...calldataToUserFriendlyJson(b64ToArray(calldata)),
+        },
+      };
+    } catch (error) {
+      console.log(error);
+    }
+  }
+  return formatted;
 }
 
 const leaderErrorDetail = computed(() => {
@@ -1506,12 +1542,12 @@ const badgeColorClass = computed(() => {
 
           <pre
             v-if="transaction.data.data.calldata.readable"
-            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 px-1 pb-3 pt-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ transaction.data.data.calldata.readable }}</pre
           >
           <pre
             v-if="!transaction.data.data.calldata.readable"
-            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 px-1 pb-3 pt-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ transaction.data.data.calldata.base64 }}</pre
           >
         </ModalSection>
@@ -1520,7 +1556,7 @@ const badgeColorClass = computed(() => {
           <template #title>Output</template>
           <div class="flex flex-col gap-2">
             <pre
-              class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+              class="overflow-x-auto whitespace-pre rounded bg-gray-200 px-1 pb-3 pt-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
               >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
             <div
@@ -1535,17 +1571,29 @@ const badgeColorClass = computed(() => {
           </div>
         </ModalSection>
 
-        <ModalSection v-if="eqOutputs.length > 0">
+        <ModalSection v-if="eqOutputRounds.length > 0">
           <template #title>Equivalence Principles Output</template>
           <div class="flex flex-col gap-2">
-            <div v-for="(output, index) in eqOutputs" :key="index">
-              <div class="mb-1 text-xs font-medium">
-                Equivalence Principle #{{ output.key }}:
-              </div>
-              <pre
-                class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
-                >{{ output.value }}</pre
+            <div
+              v-for="(round, roundIndex) in eqOutputRounds"
+              :key="roundIndex"
+              data-testid="eq-output-round"
+            >
+              <div
+                v-if="round.label && eqOutputRounds.length > 1"
+                class="mb-1 text-xs font-medium italic"
               >
+                {{ round.label }}
+              </div>
+              <div v-for="(output, index) in round.outputs" :key="index">
+                <div class="mb-1 text-xs font-medium">
+                  Equivalence Principle #{{ output.key }}:
+                </div>
+                <pre
+                  class="overflow-x-auto whitespace-pre rounded bg-gray-200 px-1 pb-3 pt-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+                  >{{ output.value }}</pre
+                >
+              </div>
             </div>
           </div>
         </ModalSection>
@@ -1769,7 +1817,7 @@ const badgeColorClass = computed(() => {
           <template #title>Equivalence Principle Output</template>
 
           <pre
-            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 px-1 pb-3 pt-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ leaderReceipt?.eq_outputs?.leader }}</pre
           >
         </ModalSection>

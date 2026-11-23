@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { useInputMap } from '@/hooks';
-import type {
-  ContractMethodBase,
-  ContractParamsSchema,
-} from 'genlayer-js/types';
+import type { ContractMethodBase } from 'genlayer-js/types';
 import { onMounted, ref, watch } from 'vue';
-import { AnyFieldValue } from '../global/fields/AnyFieldValue';
+import {
+  getDefaultValueForType,
+  getComponentProps,
+  getTypeLabel,
+} from '../global/fields/fieldValues';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ArgData } from './ContractParams';
 
@@ -15,6 +16,7 @@ const props = defineProps<{
 
 const inputMap = useInputMap();
 
+const generation = ref(0);
 const args = ref<ArgData | undefined>(undefined);
 
 // Helper to safely get args value for template usage
@@ -27,20 +29,8 @@ function getKwarg(key: string) {
   return args.value!.kwargs[key]!;
 }
 
-const getDefaultValueForType = (type: ContractParamsSchema) => {
-  switch (type) {
-    case 'bool':
-      return false;
-    case 'string':
-      return '';
-    case 'int':
-      return 0;
-    default:
-      return new AnyFieldValue('');
-  }
-};
-
 const setInputParams = (method: ContractMethodBase | undefined) => {
+  generation.value += 1;
   if (method === undefined) {
     args.value = undefined;
     return;
@@ -96,7 +86,9 @@ onMounted(() => {
 <template>
   <EmptyListPlaceholder
     v-if="
-      methodBase === undefined || args === undefined || args.args.length === 0
+      methodBase === undefined ||
+      args === undefined ||
+      (args.args.length === 0 && Object.keys(args.kwargs).length === 0)
     "
   >
     No parameters.
@@ -109,13 +101,14 @@ onMounted(() => {
   >
     <div
       v-for="([paramName, paramType], i) in methodBase.params || []"
-      :key="paramName"
+      :key="`${generation}:${paramName}`"
     >
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getArg(i).val"
+        v-bind="getComponentProps(paramType)"
         :name="paramName"
-        :placeholder="`${paramType}`"
+        :placeholder="getTypeLabel(paramType)"
         :label="paramName"
       />
     </div>
@@ -123,13 +116,14 @@ onMounted(() => {
       v-for="[paramName, paramType] in Object.entries(
         methodBase.kwparams || {},
       )"
-      :key="paramName"
+      :key="`${generation}:${paramName}`"
     >
       <component
         :is="inputMap.getComponent(paramType)"
         v-model="getKwarg(paramName).val"
+        v-bind="getComponentProps(paramType)"
         :name="paramName"
-        :placeholder="`${paramType}`"
+        :placeholder="getTypeLabel(paramType)"
         :label="paramName"
       />
     </div>

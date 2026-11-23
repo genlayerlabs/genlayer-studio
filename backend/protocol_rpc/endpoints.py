@@ -5,6 +5,7 @@ import random
 import json
 import re
 import time
+from datetime import datetime
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
@@ -107,7 +108,12 @@ import base64
 import hashlib
 import os
 import secrets as secrets_module
-from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+from backend.protocol_rpc.message_handler.types import (
+    LogEvent,
+    EventType,
+    EventScope,
+    transaction_appeal_updated_event,
+)
 from backend.protocol_rpc.types import (
     DecodedRollupTransaction,
     DecodedRollupTransactionData,
@@ -1939,6 +1945,23 @@ def get_transaction_count(
     return hex(transactions_processor.get_transaction_count(address))
 
 
+def _format_transaction_receipts(transaction: dict) -> dict:
+    consensus_data = transaction.get("consensus_data")
+    if not isinstance(consensus_data, dict):
+        return transaction
+
+    leader_receipts = consensus_data.get("leader_receipt")
+    if not isinstance(leader_receipts, list) or len(leader_receipts) != 2:
+        return transaction
+
+    # A two-entry Studio receipt holds the leader execution and self-validation.
+    return {
+        **transaction,
+        "consensus_data": {**consensus_data, "leader_receipt": leader_receipts[:1]},
+        "studio_data": {"leader_validation_receipt": leader_receipts[1]},
+    }
+
+
 def get_transaction_by_hash(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -1978,7 +2001,7 @@ def get_transaction_by_hash(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    return _sanitize_rpc_private_keys(transaction)
+    return _sanitize_rpc_private_keys(_format_transaction_receipts(transaction))
 
 
 def get_studio_transaction_by_hash(
@@ -2831,20 +2854,10 @@ def _handle_appeal_or_top_up_and_submit(
         raise
     if emit_event:
         msg_handler.send_message(
-            log_event=_transaction_appeal_updated_event(tx_id),
+            log_event=transaction_appeal_updated_event(tx_id, "Appeal admitted"),
             log_to_terminal=False,
         )
     return tx_id
-
-
-def _transaction_appeal_updated_event(tx_id: str) -> LogEvent:
-    return LogEvent(
-        "transaction_appeal_updated",
-        EventType.INFO,
-        EventScope.CONSENSUS,
-        "Set transaction appealed",
-        {"hash": tx_id},
-    )
 
 
 def _handle_finalize_transaction(
@@ -3265,7 +3278,9 @@ def _send_raw_transaction_impl(
                     decoded_rollup_transaction=decoded_rollup_transaction,
                     emit_event=False,
                 )
-                post_commit_event = _transaction_appeal_updated_event(appealed_tx_id)
+                post_commit_event = transaction_appeal_updated_event(
+                    appealed_tx_id, "Appeal admitted"
+                )
             elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
                 _handle_top_up_fees(
                     accounts_manager=accounts_manager,
@@ -3507,11 +3522,48 @@ def get_transactions_for_address(
     if not accounts_manager.is_valid_address(address):
         raise InvalidAddressError(address)
 
-    return _sanitize_rpc_private_keys(
-        transactions_processor.get_transactions_for_address(
-            address, TransactionAddressFilter(filter)
-        )
+    transactions = transactions_processor.get_transactions_for_address(
+        address, TransactionAddressFilter(filter)
     )
+    return _sanitize_rpc_private_keys(
+        [_format_transaction_receipts(transaction) for transaction in transactions]
+    )
+
+
+MAX_SENT_TRANSACTIONS_PAGE_SIZE = 100
+
+
+def get_sent_transactions_summary(
+    transactions_processor: TransactionsProcessor,
+    accounts_manager: AccountsManager,
+    address: str,
+    limit: int = 20,
+    before_created_at: str | None = None,
+    before_hash: str | None = None,
+) -> list[dict]:
+    """Lightweight, paginated transactions sent by `address` (no consensus data).
+
+    Pages are keyed by a (created_at, hash) cursor (`before_*`, the last row of
+    the previous page) rather than an offset, so they stay stable while new
+    transactions arrive."""
+    if not accounts_manager.is_valid_address(address):
+        raise InvalidAddressError(address)
+    limit = max(1, min(int(limit), MAX_SENT_TRANSACTIONS_PAGE_SIZE))
+    before = None
+    if before_created_at is not None or before_hash is not None:
+        try:
+            before = (datetime.fromisoformat(before_created_at), str(before_hash))
+        except (TypeError, ValueError):
+            raise JSONRPCError(
+                code=-32602,
+                message="before_created_at and before_hash must be given together",
+            )
+        if before_hash is None:
+            raise JSONRPCError(
+                code=-32602,
+                message="before_created_at and before_hash must be given together",
+            )
+    return transactions_processor.get_sent_transactions_summary(address, limit, before)
 
 
 @check_forbidden_method_in_hosted_studio

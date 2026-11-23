@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useAccountsStore, type AccountInfo } from '@/stores';
+import { useAccountsStore, useNetworkStore, type AccountInfo } from '@/stores';
 import { useGenlayer } from '@/hooks';
 import type { Address } from 'genlayer-js/types';
 import { getAddress } from 'viem';
@@ -29,6 +29,13 @@ vi.mock('genlayer-js', () => ({
   generatePrivateKey: vi.fn(() => testKey1),
 }));
 
+const rpc = vi.hoisted(() => ({
+  getBalance: vi.fn(),
+  fundAccount: vi.fn(),
+}));
+
+vi.mock('@/hooks/useRpcClient', () => ({ useRpcClient: () => rpc }));
+
 describe('useAccountsStore', () => {
   let accountsStore: ReturnType<typeof useAccountsStore>;
   let mockWebSocketClient: any;
@@ -37,6 +44,7 @@ describe('useAccountsStore', () => {
   };
 
   beforeEach(() => {
+    vi.resetAllMocks();
     // Set up mocks BEFORE creating the store
     mockWebSocketClient = {
       connected: true,
@@ -66,10 +74,60 @@ describe('useAccountsStore', () => {
 
     // Now create the store - this will trigger the WebSocket setup
     accountsStore = useAccountsStore();
+    useNetworkStore().setCurrentNetwork('localnet');
 
     (localStorage.getItem as Mock).mockClear();
     (localStorage.setItem as Mock).mockClear();
     (localStorage.removeItem as Mock).mockClear();
+  });
+
+  it('funds and refreshes the targeted account without switching accounts', async () => {
+    const account: AccountInfo = {
+      type: 'local',
+      address: '0x2222222222222222222222222222222222222222',
+    };
+    rpc.getBalance.mockResolvedValue('0x7d');
+
+    await expect(accountsStore.fundAccount(account, '25')).resolves.toBe(true);
+
+    expect(rpc.fundAccount).toHaveBeenCalledWith(account.address, '25');
+    expect(rpc.getBalance).toHaveBeenCalledWith(account.address);
+    expect(accountsStore.balances[account.address]).toBe(125n);
+    expect(accountsStore.selectedAccount?.address).toBe(testAddress1);
+    expect(accountsStore.funding[account.address]).toBeUndefined();
+  });
+
+  it('clears the balance cache and disregards a pending read on network change', async () => {
+    const network = useNetworkStore();
+    let completeRead!: (value: string) => void;
+    rpc.getBalance.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          completeRead = resolve;
+        }),
+    );
+    accountsStore.balances[testAddress1] = 100n;
+    const refresh = accountsStore.refreshBalance(testAddress1);
+
+    network.setCurrentNetwork('testnetBradbury');
+    completeRead('0x7d');
+    await refresh;
+
+    expect(accountsStore.balances[testAddress1]).toBeUndefined();
+  });
+
+  it('does not call the Studio faucet for external wallets or on testnet', async () => {
+    await expect(
+      accountsStore.fundAccount(
+        { type: 'external', address: testAddress1 },
+        '25',
+      ),
+    ).resolves.toBe(false);
+    useNetworkStore().setCurrentNetwork('testnetBradbury');
+    await expect(
+      accountsStore.fundAccount({ type: 'local', address: testAddress1 }, '25'),
+    ).resolves.toBe(false);
+    expect(rpc.fundAccount).not.toHaveBeenCalled();
   });
 
   it('should generate a new account', () => {

@@ -59,6 +59,31 @@ describe('useTransactionListener', () => {
     expect(transactionsStoreMock.updateTransaction).toHaveBeenCalledWith(newTx);
   });
 
+  it('keeps the appeal receipt when an earlier status request finishes later', async () => {
+    useTransactionListener().init();
+    const onStatus = webSocketClientMock.on.mock.calls[0][1];
+    const onAppeal = webSocketClientMock.on.mock.calls.find(
+      ([name]: [string]) => name === 'transaction_appeal_updated',
+    )[1];
+    const event = { data: { hash: '123' } };
+    const accepted = { hash: '123', statusName: 'ACCEPTED' };
+    const undetermined = { hash: '123', statusName: 'UNDETERMINED' };
+    let resolveStatus!: (receipt: typeof undetermined) => void;
+    transactionsStoreMock.transactions = [undetermined];
+    transactionsStoreMock.getTransaction
+      .mockReturnValueOnce(new Promise((resolve) => (resolveStatus = resolve)))
+      .mockResolvedValueOnce(accepted);
+
+    const pendingStatus = onStatus(event);
+    await onAppeal(event);
+    resolveStatus(undetermined);
+    await pendingStatus;
+
+    expect(
+      transactionsStoreMock.updateTransaction,
+    ).toHaveBeenCalledExactlyOnceWith(accepted);
+  });
+
   it('should remove transaction if server tx not found', async () => {
     const { init } = useTransactionListener();
     init();

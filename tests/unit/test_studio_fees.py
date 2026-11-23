@@ -1490,6 +1490,66 @@ def test_internal_child_clamps_parent_rotations_to_its_own_fee_schedule():
     assert _child_config_rotation_rounds(1, {"calldata": b"legacy"}) == 1
 
 
+@pytest.mark.parametrize(
+    ("floor", "distribution", "expected"),
+    [
+        (
+            "",
+            {"leaderTimeunitsAllocation": "100", "validatorTimeunitsAllocation": 200},
+            (600, 600),
+        ),
+        (
+            "600",
+            {"leaderTimeunitsAllocation": "100", "validatorTimeunitsAllocation": 200},
+            (600, 600),
+        ),
+        (
+            "45",
+            {"leaderTimeunitsAllocation": "90", "validatorTimeunitsAllocation": 180},
+            (90, 180),
+        ),
+        (
+            "45",
+            {"leaderTimeunitsAllocation": 1, "validatorTimeunitsAllocation": 900},
+            (45, 250),
+        ),
+        (
+            "1",
+            {"leaderTimeunitsAllocation": 1, "validatorTimeunitsAllocation": 900},
+            (30, 250),
+        ),
+        (
+            "45",
+            {"leaderTimeunitsAllocation": 0, "validatorTimeunitsAllocation": "0"},
+            (600, 600),
+        ),
+        ("45", None, (600, 600)),
+        ("45", {"leaderTimeunitsAllocation": "invalid"}, (600, 600)),
+    ],
+)
+def test_consensus_execution_deadlines_use_transaction_time_allocations(
+    monkeypatch, floor, distribution, expected
+):
+    monkeypatch.setenv("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS", floor)
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "30")
+    monkeypatch.setenv(
+        "GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS", "250" if floor in ("1", "45") else "600"
+    )
+    data = (
+        {FEE_ACCOUNTING_KEY: {"fees_distribution": distribution}}
+        if distribution is not None
+        else {"calldata": b"legacy"}
+    )
+    transaction = SimpleNamespace(data=data)
+
+    assert (
+        consensus_base._slot_budget_seconds(transaction, "leader"),
+        consensus_base._slot_budget_seconds(transaction, "validator"),
+    ) == expected
+
+
 def test_runtime_rotations_follow_each_normal_round_schedule_entry():
     accounting = _env_fee_accounting(
         _env_fees_distribution(appeals=2, rotations=[3, 1, 2])
@@ -9922,7 +9982,7 @@ def test_committed_child_uses_parent_policy_then_checks_own_activation_floor():
     }
 
 
-def test_create_child_fee_accounting_prices_primary_at_child_owned_caps():
+def test_create_child_fee_accounting_prices_primary_at_child_owned_caps(monkeypatch):
     policy = StudioFeePolicy(
         gen_per_time_unit=2,
         storage_unit_price=3,
@@ -9973,6 +10033,18 @@ def test_create_child_fee_accounting_prices_primary_at_child_owned_caps():
     assert child_accounting["paid_fee_value"] == child_primary
     assert child_accounting["policy_snapshot"]["gen_per_time_unit"] == 2
     assert child_accounting["user_value"] == 7
+
+    monkeypatch.setenv("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS", "1")
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
+    child = SimpleNamespace(data={FEE_ACCOUNTING_KEY: child_accounting})
+    assert consensus_base._slot_budget_seconds(child, "leader") == 5
+    assert consensus_base._slot_budget_seconds(child, "validator") == 10
+
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "8")
+    assert consensus_base._slot_budget_seconds(child, "validator") == 8
 
 
 def test_zero_work_internal_child_and_zero_principal_appeal_match_consensus():

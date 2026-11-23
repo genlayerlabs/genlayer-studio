@@ -10,6 +10,7 @@ import {
   useContractsStore,
   useTransactionsStore,
   useAccountsStore,
+  useConsensusStore,
 } from '@/stores';
 import { useDebounceFn } from '@vueuse/core';
 import { notify } from '@kyvg/vue3-notification';
@@ -31,6 +32,7 @@ import type {
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
 import { JsonRpcServiceError } from '@/services/JsonRpcService';
+import { applyFeeSettings, sanitizeFeeSettings } from '@/utils/consensusFees';
 
 const schema = ref<any>();
 
@@ -146,6 +148,7 @@ export function useContractQueries() {
   const rpcClient = useRpcClient();
   const wallet = useWallet();
   const accountsStore = useAccountsStore();
+  const consensusStore = useConsensusStore();
   const transactionsStore = useTransactionsStore();
   const contractsStore = useContractsStore();
   const queryClient = useQueryClient();
@@ -227,6 +230,57 @@ export function useContractQueries() {
     };
   }
 
+  async function estimateStudioSubmissionFees(params: Record<string, unknown>) {
+    let settings = consensusStore.feeSettings;
+    const hasOverrides = Object.values(settings).some(Boolean);
+    let distribution:
+      | StudioFeeConfig['defaultFees']['distribution']
+      | undefined;
+    if (hasOverrides) {
+      // Always read the current policy: the server may change its bounds
+      // without the RPC URL changing.
+      const config = await rpcClient.getFeeConfig();
+      studioFeeConfig.value = config;
+      if (!config.enabled) return undefined;
+      // Ignore overrides the active policy rejects instead of failing every
+      // submission.
+      const { settings: clean, dropped } = sanitizeFeeSettings(
+        settings,
+        config.policy,
+      );
+      if (dropped.length) {
+        notify({
+          title: 'Ignoring invalid fee settings',
+          text: `Using Studio defaults for: ${dropped.join(', ')}.`,
+          type: 'warning',
+        });
+      }
+      settings = clean;
+      distribution = applyFeeSettings(
+        config.defaultFees.distribution,
+        settings,
+      );
+    }
+
+    try {
+      const estimate = await rpcClient.estimateTransactionFees({
+        ...params,
+        // Let Studio calculate the matching deposit and discover message fees.
+        ...(distribution ? { fees: { distribution } } : {}),
+      });
+      return feesFromStudioEstimate(estimate);
+    } catch (error) {
+      // Failed execution still needs a funded envelope to produce its receipt.
+      if (!isExpectedSimulationExecutionFailure(error)) throw error;
+      if (!distribution) return getDefaultStudioFees();
+      const roundFees = await rpcClient.calculateRoundFees(distribution);
+      return {
+        distribution,
+        feeValue: BigInt(roundFees) + BigInt(distribution.totalMessageFees),
+      };
+    }
+  }
+
   async function getStudioWriteFees({
     method,
     args,
@@ -240,30 +294,21 @@ export function useContractQueries() {
     value: bigint;
     leaderOnly: boolean;
   }): Promise<TrustedFeeEstimate | undefined> {
-    try {
-      const serialized = await encodeWriteMethodCalldata(
-        method,
-        args,
-        kwargs,
-        leaderOnly,
-      );
-      const estimate = await rpcClient.estimateTransactionFees({
-        scenarioName: method,
-        type: 'write',
-        to: address.value,
-        from: accountsStore.selectedAccount?.address,
-        data: serialized,
-        value: '0x' + value.toString(16),
-        transaction_hash_variant: 'latest-nonfinal',
-      });
-      return feesFromStudioEstimate(estimate);
-    } catch (error) {
-      // Preserve the ability to submit transactions whose execution is
-      // intentionally expected to fail; they still need a valid base fee
-      // envelope so Consensus can materialize the error receipt.
-      if (!isExpectedSimulationExecutionFailure(error)) throw error;
-      return getDefaultStudioFees();
-    }
+    const serialized = await encodeWriteMethodCalldata(
+      method,
+      args,
+      kwargs,
+      leaderOnly,
+    );
+    return estimateStudioSubmissionFees({
+      scenarioName: method,
+      type: 'write',
+      to: address.value,
+      from: accountsStore.selectedAccount?.address,
+      data: serialized,
+      value: '0x' + value.toString(16),
+      transaction_hash_variant: 'latest-nonfinal',
+    });
   }
 
   async function getStudioDeployFees({
@@ -277,25 +322,19 @@ export function useContractQueries() {
     kwargs: { [key: string]: CalldataEncodable };
     leaderOnly: boolean;
   }): Promise<TrustedFeeEstimate | undefined> {
-    try {
-      const serialized = await encodeDeployCalldata(
-        code,
-        args,
-        kwargs,
-        leaderOnly,
-      );
-      const estimate = await rpcClient.estimateTransactionFees({
-        scenarioName: 'deploy',
-        type: 'deploy',
-        to: '0x0000000000000000000000000000000000000000',
-        from: accountsStore.selectedAccount?.address,
-        data: serialized,
-      });
-      return feesFromStudioEstimate(estimate);
-    } catch (error) {
-      if (!isExpectedSimulationExecutionFailure(error)) throw error;
-      return getDefaultStudioFees();
-    }
+    const serialized = await encodeDeployCalldata(
+      code,
+      args,
+      kwargs,
+      leaderOnly,
+    );
+    return estimateStudioSubmissionFees({
+      scenarioName: 'deploy',
+      type: 'deploy',
+      to: '0x0000000000000000000000000000000000000000',
+      from: accountsStore.selectedAccount?.address,
+      data: serialized,
+    });
   }
 
   const contractSchemaQuery = useQuery({

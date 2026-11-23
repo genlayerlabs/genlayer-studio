@@ -482,6 +482,14 @@ def register_endpoints_for_fastapi(
         "sim_getTransactionsForAddress",
     )
     register(
+        partial(
+            endpoints.get_sent_transactions_summary,
+            transactions_processor,
+            accounts_manager,
+        ),
+        "sim_getSentTransactions",
+    )
+    register(
         partial(endpoints.set_finality_window_time, consensus),
         "sim_setFinalityWindowTime",
     )

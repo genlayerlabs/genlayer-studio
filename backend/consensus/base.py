@@ -7,6 +7,7 @@ DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 
 import os
+import math
 import asyncio
 from typing import Any, Callable, List, Iterable, Literal
 import time
@@ -304,29 +305,45 @@ def _slot_budget_seconds(
     transaction: Transaction,
     role: Literal["leader", "validator"],
 ) -> float:
-    """Per-tx slot budget.
-
-    Future: read from transaction.sim_config / gas mechanism. Today: env var
-    fallback.
-    """
-    _ = transaction
+    """Apply the operator cap and, when enabled, the bounded funded deadline."""
     if role == "leader":
+        allocation_key = "leaderTimeunitsAllocation"
         env_key = "CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS"
         default = DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS
     else:
+        allocation_key = "validatorTimeunitsAllocation"
         env_key = "CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS"
         default = DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS
 
-    raw_timeout = os.getenv(env_key)
-    if raw_timeout is None:
-        return float(default)
+    cap = _positive_timeout(env_key) or float(default)
+    floor = _positive_timeout("CONSENSUS_FUNDED_EXEC_TIMEOUT_FLOOR_SECONDS")
+    if floor is None:
+        return cap
+
+    accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    distribution = accounting.get("fees_distribution") or {}
     try:
-        timeout = float(raw_timeout)
+        allocation = int(distribution.get(allocation_key) or 0)
+    except (TypeError, ValueError):
+        return cap
+    if allocation <= 0:
+        return cap
+
+    policy = StudioFeePolicy.from_env()
+    if role == "leader":
+        minimum, maximum = policy.min_propose_timeunits, policy.max_propose_timeunits
+    else:
+        minimum, maximum = policy.min_commit_timeunits, policy.max_commit_timeunits
+    # One protocol time unit is one second of GenVM wall-clock runtime.
+    return min(cap, maximum, max(floor, minimum, allocation))
+
+
+def _positive_timeout(env_key: str) -> float | None:
+    try:
+        timeout = float(os.getenv(env_key, ""))
     except ValueError:
-        return float(default)
-    if timeout <= 0:
-        return float(default)
-    return timeout
+        return None
+    return timeout if math.isfinite(timeout) and timeout > 0 else None
 
 
 def node_factory(
@@ -1129,18 +1146,6 @@ class ConsensusAlgorithm:
                     transaction_hash=transaction.hash,
                 )
             )
-            self.msg_handler.send_message(
-                log_event=LogEvent(
-                    "transaction_appeal_updated",
-                    EventType.INFO,
-                    EventScope.CONSENSUS,
-                    "Set transaction appealed",
-                    {
-                        "hash": context.transaction.hash,
-                    },
-                ),
-                log_to_terminal=False,
-            )
 
         else:
             transactions_processor.set_transaction_appeal(transaction.hash, False)
@@ -1225,18 +1230,6 @@ class ConsensusAlgorithm:
                     },
                     transaction_hash=transaction.hash,
                 )
-            )
-            self.msg_handler.send_message(
-                log_event=LogEvent(
-                    "transaction_appeal_updated",
-                    EventType.INFO,
-                    EventScope.CONSENSUS,
-                    "Set transaction appealed",
-                    {
-                        "hash": context.transaction.hash,
-                    },
-                ),
-                log_to_terminal=False,
             )
 
         else:
@@ -1344,18 +1337,6 @@ class ConsensusAlgorithm:
                 "appeal_committee_unavailable",
             )
             context.transaction.appealed = False
-            self.msg_handler.send_message(
-                log_event=LogEvent(
-                    "transaction_appeal_updated",
-                    EventType.INFO,
-                    EventScope.CONSENSUS,
-                    "Set transaction appealed",
-                    {
-                        "hash": context.transaction.hash,
-                    },
-                ),
-                log_to_terminal=False,
-            )
             context.transactions_processor.set_transaction_appeal_processing_time(
                 context.transaction.hash
             )
@@ -2677,6 +2658,72 @@ class PendingState(TransactionState):
             )
             return None
 
+        # An empty Studio validator set is a configuration error. Cancel new
+        # contract transactions before activation; preserve agreed decisions
+        # and their existing recovery path when re-entering for an appeal.
+        is_initial_activation = not (
+            bool(context.transaction.consensus_data)
+            or bool(context.transaction.consensus_history)
+            or bool(context.transaction.appealed)
+            or bool(context.transaction.appeal_undetermined)
+            or bool(context.transaction.appeal_leader_timeout)
+            or bool(context.transaction.appeal_validators_timeout)
+        )
+        if (
+            is_initial_activation
+            and context.transaction.type != TransactionType.SEND
+            and (
+                # Defensive for direct callers: the worker's manager raises
+                # rather than returning a missing snapshot.
+                context.validators_snapshot is None
+                or not context.validators_snapshot.nodes
+            )
+        ):
+            tx_hash = context.transaction.hash
+            value_sender = context.transaction.from_address
+            if value_sender:
+                # Recovery clears consensus fields but can retain an activation
+                # credit. Reverse that credit before trying the uncredited refund.
+                refunded_activated = (
+                    context.accounts_manager.refund_activated_tx_value_once(
+                        tx_hash, context.transaction.to_address, value_sender
+                    )
+                )
+                if not refunded_activated:
+                    context.accounts_manager.refund_tx_value(tx_hash, value_sender)
+            fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+            fee_sender = (
+                fee_accounting.get("sender")
+                if isinstance(fee_accounting, dict)
+                else None
+            ) or value_sender
+            if fee_sender:
+                context.accounts_manager.cancel_tx_fee_accounting_once(
+                    tx_hash, fee_sender, "no_validators_available"
+                )
+            # The status dispatch below commits refunds, error and CANCELED
+            # together, so recovery cannot execute a refunded PENDING transaction.
+            context.transactions_processor.set_transaction_result(
+                tx_hash, {"error": "no_validators_available"}, commit=False
+            )
+            context.msg_handler.send_message(
+                LogEvent(
+                    "consensus_event",
+                    EventType.ERROR,
+                    EventScope.CONSENSUS,
+                    "No validators found to process transaction",
+                    {"transaction_hash": tx_hash},
+                    transaction_hash=tx_hash,
+                )
+            )
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                context.transactions_processor,
+                tx_hash,
+                TransactionStatus.CANCELED,
+                context.msg_handler,
+            )
+            return None
+
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
             tx_hash=context.transaction.hash,
@@ -2800,14 +2847,6 @@ class PendingState(TransactionState):
                 fee_accounting,
             )
 
-        is_initial_activation = not (
-            bool(context.transaction.consensus_data)
-            or bool(context.transaction.consensus_history)
-            or bool(context.transaction.appealed)
-            or bool(context.transaction.appeal_undetermined)
-            or bool(context.transaction.appeal_leader_timeout)
-            or bool(context.transaction.appeal_validators_timeout)
-        )
         requested_initial_validators = int(
             context.transaction.num_of_initial_validators or DEFAULT_VALIDATORS_COUNT
         )
@@ -3624,7 +3663,10 @@ class RevealingState(TransactionState):
                 )
             )
 
-        # Leader receipt split
+        # A fresh proposal (including a rotation) starts with one leader
+        # execution receipt. Committing runs that leader's validation first,
+        # so the second stored receipt always belongs to the same leader.
+        # A validator appeal carries the original pair into the new jury round.
         if (
             context.consensus_data.leader_receipt
             and len(context.consensus_data.leader_receipt) == 1
