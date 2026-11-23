@@ -32,7 +32,7 @@ import type {
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
 import { JsonRpcServiceError } from '@/services/JsonRpcService';
-import { applyFeeSettings } from '@/utils/consensusFees';
+import { applyFeeSettings, sanitizeFeeSettings } from '@/utils/consensusFees';
 
 const schema = ref<any>();
 
@@ -231,7 +231,7 @@ export function useContractQueries() {
   }
 
   async function estimateStudioSubmissionFees(params: Record<string, unknown>) {
-    const settings = consensusStore.feeSettings;
+    let settings = consensusStore.feeSettings;
     const hasOverrides = Object.values(settings).some(Boolean);
     let distribution:
       | StudioFeeConfig['defaultFees']['distribution']
@@ -240,6 +240,20 @@ export function useContractQueries() {
       const config = studioFeeConfig.value ?? (await rpcClient.getFeeConfig());
       studioFeeConfig.value = config;
       if (!config.enabled) return undefined;
+      // Ignore overrides the active policy rejects instead of failing every
+      // submission.
+      const { settings: clean, dropped } = sanitizeFeeSettings(
+        settings,
+        config.policy,
+      );
+      if (dropped.length) {
+        notify({
+          title: 'Ignoring invalid fee settings',
+          text: `Using Studio defaults for: ${dropped.join(', ')}.`,
+          type: 'warning',
+        });
+      }
+      settings = clean;
       distribution = applyFeeSettings(
         config.defaultFees.distribution,
         settings,

@@ -3,6 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ConsensusFeeSection from '@/components/Simulator/settings/ConsensusFeeSection.vue';
 import { loadFeeSettings, saveFeeSettings } from '@/utils/consensusFees';
 
+const policy = {
+  minProposeTimeunits: '30',
+  maxProposeTimeunits: '600',
+  minCommitTimeunits: '30',
+  maxCommitTimeunits: '600',
+};
+vi.mock('@/hooks', () => ({
+  useRpcClient: () => ({ getFeeConfig: async () => ({ policy }) }),
+}));
+
 vi.mock('@/stores', () => ({
   useConsensusStore: () => ({
     feeSettings: loadFeeSettings(),
@@ -57,5 +67,42 @@ describe('ConsensusFeeSection', () => {
       'each appeal round',
     );
     expect(loadFeeSettings().appealRounds).toBe('');
+  });
+
+  it('rejects timeouts outside the active policy bounds', async () => {
+    const settings = mount(ConsensusFeeSection, {
+      global: { stubs: ['Loader'] },
+    });
+    await new Promise((r) => setTimeout(r));
+    await settings.findAll('input')[0].setValue('1');
+    await settings.get('form').trigger('submit');
+    expect(settings.get('[role="alert"]').text()).toContain(
+      'between 30 and 600',
+    );
+    expect(loadFeeSettings().leaderTimeunitsAllocation).toBe('');
+  });
+
+  it('reports when the browser blocks persistence', async () => {
+    const spy = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('denied');
+      });
+    const settings = mount(ConsensusFeeSection, {
+      global: { stubs: ['Loader'] },
+    });
+    await settings.findAll('input')[0].setValue('120');
+    await settings.get('form').trigger('submit');
+    spy.mockRestore();
+    expect(settings.get('[role="alert"]').text()).toContain('blocked saving');
+    expect(settings.find('[role="status"]').exists()).toBe(false);
+  });
+
+  it('drops an inconsistent environment schedule when loading', () => {
+    vi.stubEnv('VITE_APPEAL_ROUNDS_FEE', '2');
+    vi.stubEnv('VITE_ROTATIONS_FEE', '0,1');
+    const loaded = loadFeeSettings();
+    expect(loaded.appealRounds).toBe('');
+    expect(loaded.rotations).toBe('');
   });
 });

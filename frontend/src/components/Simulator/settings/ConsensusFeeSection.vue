@@ -1,15 +1,31 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
+import { useRpcClient } from '@/hooks';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import Btn from '@/components/global/Btn.vue';
 import FieldError from '@/components/global/fields/FieldError.vue';
 import { useConsensusStore } from '@/stores';
-import { feeFields, isValidFeeSetting } from '@/utils/consensusFees';
+import {
+  feeFields,
+  feeTimeoutError,
+  isConsistentSchedule,
+  isValidFeeSetting,
+  type FeePolicy,
+} from '@/utils/consensusFees';
 
 const consensusStore = useConsensusStore();
 const settings = reactive({ ...consensusStore.feeSettings });
 const error = ref('');
 const saved = ref(false);
+const policy = ref<FeePolicy>();
+
+onMounted(async () => {
+  try {
+    policy.value = (await useRpcClient().getFeeConfig()).policy;
+  } catch {
+    // Without the active policy the backend still validates on submission.
+  }
+});
 
 function save() {
   saved.value = false;
@@ -20,24 +36,36 @@ function save() {
     }
   }
 
+  for (const field of [
+    'leaderTimeunitsAllocation',
+    'validatorTimeunitsAllocation',
+  ] as const) {
+    const timeoutError = feeTimeoutError(field, settings[field], policy.value);
+    if (timeoutError) {
+      error.value = timeoutError;
+      return;
+    }
+  }
+
   const rounds = settings.appealRounds.trim();
   const rotations = settings.rotations.trim();
-  if (
-    rounds &&
-    rotations &&
-    rotations.split(',').length !== Number(rounds) + 1
-  ) {
+  if (!isConsistentSchedule(settings)) {
     error.value =
       'Enter one rotation count for the initial round and each appeal round.';
     return;
   }
 
-  consensusStore.setFeeSettings({
+  const persisted = consensusStore.setFeeSettings({
     leaderTimeunitsAllocation: settings.leaderTimeunitsAllocation.trim(),
     validatorTimeunitsAllocation: settings.validatorTimeunitsAllocation.trim(),
     appealRounds: rounds,
     rotations,
   });
+  if (!persisted) {
+    error.value =
+      'Applied for this session only: the browser blocked saving the settings.';
+    return;
+  }
   error.value = '';
   saved.value = true;
 }

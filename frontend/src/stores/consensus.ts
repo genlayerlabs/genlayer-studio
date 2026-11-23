@@ -22,7 +22,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
 
   function setFeeSettings(settings: FeeSettings) {
     feeSettings.value = settings;
-    saveFeeSettings(settings);
+    return saveFeeSettings(settings);
   }
 
   // Track initialization state to prevent duplicate loading state changes
