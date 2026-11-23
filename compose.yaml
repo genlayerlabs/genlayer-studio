@@ -7,8 +7,8 @@
 # which layers both files (the Python backend layers them in either case).
 # Compose warns that both this file and docker-compose.yml exist; it uses this one.
 # Explicit `-f docker-compose.yml ...` callers bypass this file and only get the
-# project `.env`. In CI that is a full copy of `.env.example` (a mirror of
-# `.env.default`); otherwise pass `--env-file .env.default --env-file .env`.
+# project `.env`. Use `scripts/compose.sh -f ...` for sparse or missing `.env` files (it layers both). CI uses a full copy of
+# `.env.example`, a mirror of `.env.default`.
 include:
   - path: docker-compose.yml
     env_file:

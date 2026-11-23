@@ -198,3 +198,46 @@ def test_ci_compose_entry_point_gets_every_tracked_default(tmp_path):
     tracked = set(dotenv_values(ROOT_DIR / ".env.default"))
     unset = set(re.findall(r'The \\?"(\w+)\\?" variable is not set', result.stderr))
     assert unset.isdisjoint(tracked), unset & tracked
+
+
+def _wrapper_config(tmp_path, env_text):
+    import os
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("docker-compose"):
+        binary = "docker-compose"
+    elif shutil.which("docker"):
+        binary = "docker compose"
+    else:
+        pytest.skip("docker compose is not installed")
+
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(ROOT_DIR / "scripts" / "compose.sh", tmp_path / "scripts")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: x\n    environment:\n"
+        '      - PW=${DBPASSWORD}\n    ports:\n      - "${HOSTPORT:-1}:80"\n'
+    )
+    (tmp_path / ".env.default").write_text("DBPASSWORD=postgres\nDEBUGPORT=4678\n")
+    if env_text is not None:
+        (tmp_path / ".env").write_text(env_text)
+    return subprocess.run(
+        ["bash", "scripts/compose.sh", "-f", "docker-compose.yml", "config"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "COMPOSE_BIN": binary},
+    ).stdout
+
+
+def test_wrapper_explicit_file_with_missing_env(tmp_path):
+    assert "PW: postgres" in _wrapper_config(tmp_path, None)
+
+
+def test_wrapper_explicit_file_with_partial_env_and_cross_reference(tmp_path):
+    out = _wrapper_config(tmp_path, "HOSTPORT=${DEBUGPORT}\n")
+    assert "PW: postgres" in out
+    assert 'published: "4678"' in out
