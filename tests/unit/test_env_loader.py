@@ -117,8 +117,6 @@ def _compose_config(tmp_path, *args):
     import shutil
     import subprocess
 
-    import pytest
-
     compose = _compose_command()
 
     shutil.copy(ROOT_DIR / "compose.yaml", tmp_path / "compose.yaml")
@@ -160,7 +158,6 @@ def test_ci_compose_entry_point_gets_every_tracked_default(tmp_path):
     import shutil
     import subprocess
 
-    import pytest
     from dotenv import dotenv_values
 
     compose = _compose_command()
@@ -195,8 +192,6 @@ def _wrapper_config(tmp_path, env_text, files=("-f", "docker-compose.yml")):
     import os
     import shutil
     import subprocess
-
-    import pytest
 
     compose = _compose_command()
 
