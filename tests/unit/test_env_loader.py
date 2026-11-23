@@ -62,9 +62,10 @@ def test_reference_uses_override_value(tmp_path, monkeypatch):
 
 def test_env_example_matches_env_default():
     # `.env.example` is kept for tooling that copies it (CLI, CI); it must not drift.
-    assert (ROOT_DIR / ".env.example").read_text() == (
-        ROOT_DIR / ".env.default"
-    ).read_text()
+    def body(name):
+        return (ROOT_DIR / name).read_text().splitlines()[4:]  # skip the 4-line header
+
+    assert body(".env.example") == body(".env.default")
 
 
 def _hardhat_chain_id(root, env=None):
@@ -118,12 +119,7 @@ def _compose_config(tmp_path, *args):
 
     import pytest
 
-    if shutil.which("docker-compose"):
-        compose = ["docker-compose"]
-    elif shutil.which("docker"):
-        compose = ["docker", "compose"]
-    else:
-        pytest.skip("docker compose is not installed")
+    compose = _compose_command()
 
     shutil.copy(ROOT_DIR / "compose.yaml", tmp_path / "compose.yaml")
     (tmp_path / "docker-compose.yml").write_text(
@@ -167,12 +163,7 @@ def test_ci_compose_entry_point_gets_every_tracked_default(tmp_path):
     import pytest
     from dotenv import dotenv_values
 
-    if shutil.which("docker-compose"):
-        compose = ["docker-compose"]
-    elif shutil.which("docker"):
-        compose = ["docker", "compose"]
-    else:
-        pytest.skip("docker compose is not installed")
+    compose = _compose_command()
 
     for name in ("docker-compose.yml", "docker-compose.ci.yml"):
         shutil.copy(ROOT_DIR / name, tmp_path / name)
@@ -207,12 +198,7 @@ def _wrapper_config(tmp_path, env_text, files=("-f", "docker-compose.yml")):
 
     import pytest
 
-    if shutil.which("docker-compose"):
-        binary = "docker-compose"
-    elif shutil.which("docker"):
-        binary = "docker compose"
-    else:
-        pytest.skip("docker compose is not installed")
+    compose = _compose_command()
 
     (tmp_path / "scripts").mkdir()
     shutil.copy(ROOT_DIR / "scripts" / "compose.sh", tmp_path / "scripts")
@@ -229,7 +215,7 @@ def _wrapper_config(tmp_path, env_text, files=("-f", "docker-compose.yml")):
         capture_output=True,
         text=True,
         check=True,
-        env={**os.environ, "COMPOSE_BIN": binary},
+        env={**os.environ, "COMPOSE_BIN": " ".join(compose)},
     ).stdout
 
 
@@ -251,3 +237,29 @@ def test_documented_command_resolves_cross_file_override(tmp_path):
     out = _wrapper_config(tmp_path, "HOSTPORT=${DEBUGPORT}\n", files=())
     assert 'published: "4678"' in out
     assert "PW: postgres" in out
+
+
+def _compose_command():
+    """Compose v2 (needed for `include`): `docker compose`, else a v2 `docker-compose`."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    candidates = []
+    if shutil.which("docker"):
+        candidates.append(["docker", "compose"])
+    if shutil.which("docker-compose"):
+        candidates.append(["docker-compose"])
+    for command in candidates:
+        probe = subprocess.run(
+            [*command, "version", "--short"], capture_output=True, text=True
+        )
+        version = probe.stdout.strip().lstrip("v")
+        if (
+            probe.returncode == 0
+            and version[:1].isdigit()
+            and int(version.split(".")[0]) >= 2
+        ):
+            return command
+    pytest.skip("docker compose v2 is not installed")
