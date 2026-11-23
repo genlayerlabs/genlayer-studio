@@ -96,6 +96,14 @@ const mockAccountsStore = {
 };
 
 vi.mock('@/stores', () => ({
+  useConsensusStore: vi.fn(() => ({
+    feeSettings: {
+      leaderTimeunitsAllocation: '',
+      validatorTimeunitsAllocation: '',
+      appealRounds: '',
+      rotations: '',
+    },
+  })),
   useContractsStore: vi.fn(() => mockContractsStore),
   useTransactionsStore: vi.fn(() => mockTransactionsStore),
   useAccountsStore: vi.fn(() => mockAccountsStore),
@@ -225,6 +233,28 @@ describe('wallet chain enforcement — provider → enforcer → tx → notifica
       );
       expect(wallet.currentChainId()).toBe(STUDIO_CHAIN_ID);
       expect(mockDeployContract).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows only a short message for a non-chain RPC failure, not the request body', async () => {
+      mockWalletProvider.value = createWallet(STUDIO_CHAIN_ID);
+      const body = '0xdeadbeef'.repeat(2000);
+      const viemError = Object.assign(
+        new Error(
+          `HTTP request failed.\n\nRequest body: {"params":["${body}"]}`,
+        ),
+        { shortMessage: 'HTTP request failed.', details: 'insufficient funds' },
+      );
+      mockDeployContract.mockRejectedValueOnce(viemError);
+      const { deployContract } = useContractQueries();
+
+      await expect(
+        deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3),
+      ).rejects.toThrow();
+
+      const shown = vi.mocked(notify).mock.calls[0][0] as { text: string };
+      expect(shown.text).toBe('insufficient funds');
+      expect(shown.text).not.toContain('Request body');
+      expect(shown.text).not.toContain('0xdeadbeef');
     });
 
     it('deploys without touching the wallet network when already on the right chain', async () => {
