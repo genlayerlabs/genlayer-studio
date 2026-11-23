@@ -13,6 +13,7 @@ import type {
   TransactionItem,
   GetTransactionCountRequest,
   StudioFeeConfig,
+  StudioFeesDistribution,
   StudioFeeEstimateResult,
 } from '@/types';
 
@@ -207,6 +208,16 @@ export class JsonRpcService implements IJsonRpcService {
       [],
       'Error getting providers and models',
     );
+  }
+
+  async calculateRoundFees(
+    distribution: StudioFeesDistribution,
+  ): Promise<string> {
+    return this.callRpcMethod<string>(
+      'sim_calculateRoundFees',
+      [distribution],
+      'Error quoting Studio transaction fees',
+    ) as Promise<string>;
   }
 
   async getFeeConfig(): Promise<StudioFeeConfig> {
