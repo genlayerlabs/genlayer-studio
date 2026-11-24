@@ -507,3 +507,73 @@ async def test_no_quorum_replaces_timeout_slots_only(monkeypatch):
         "validator-3",
         "validator-4",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unfunded_message_becomes_leader_timeout_at_proposal():
+    from eth_abi import encode
+
+    from backend.node.types import PendingTransaction
+    from backend.protocol_rpc.fees import create_fee_accounting
+
+    fee_params = encode(
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
+        [(5, 10, 0, 0, [0], 1, 2**200, 2**200)],
+    )
+
+    async def exec_ok(_transaction):
+        return Receipt(
+            result=bytes([ResultCode.RETURN]),
+            calldata=b"",
+            gas_used=0,
+            mode=ExecutionMode.LEADER,
+            contract_state={},
+            node_config={"address": "leader"},
+            execution_result=ExecutionResultStatus.SUCCESS,
+            vote=None,
+            pending_transactions=[
+                PendingTransaction(
+                    address="0x2222222222222222222222222222222222222222",
+                    calldata=b"\x06",
+                    code=None,
+                    salt_nonce=0,
+                    on="finalized",
+                    value=2 * 10**18,
+                    fee_params=fee_params,
+                    declared_budget=0,
+                )
+            ],
+        )
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(exec_transaction=exec_ok),
+    )
+    context.transaction.data = {
+        FEE_ACCOUNTING_KEY: create_fee_accounting(
+            fees_distribution={
+                "leaderTimeunitsAllocation": 100,
+                "validatorTimeunitsAllocation": 200,
+                "appealRounds": 0,
+                "executionBudgetPerRound": 0,
+                "executionConsumed": 0,
+                "totalMessageFees": 0,
+                "rotations": [0],
+                "maxPriceGenPerTimeUnit": 0,
+                "storageFeeMaxGasPrice": 0,
+                "receiptFeeMaxGasPrice": 0,
+            },
+            num_of_validators=5,
+            submitted_value=1100,
+            user_value=0,
+        )
+    }
+    context.involved_validators = [context.leader]
+    context.transaction.execution_mode = TransactionExecutionMode.NORMAL
+    context.transaction.appeal_leader_timeout = False
+
+    next_state = await asyncio.wait_for(ProposingState().handle(context), 3)
+
+    assert isinstance(next_state, LeaderTimeoutState)
+    [receipt] = context.consensus_data.leader_receipt
+    assert receipt.genvm_result["stderr"] == "MessageDeclaredBudgetInsufficient"
