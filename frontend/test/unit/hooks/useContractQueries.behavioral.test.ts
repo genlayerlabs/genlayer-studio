@@ -36,6 +36,8 @@ const mockEstimateTransactionFees = vi.fn(() =>
   }),
 );
 
+const mockEstimateTransactionFeesForWrite = vi.fn();
+
 const mockGenlayerClient = {
   deployContract: mockDeployContract,
   writeContract: mockWriteContract,
@@ -45,6 +47,7 @@ const mockGenlayerClient = {
   getContractCode: mockGetContractCode,
   simulateWriteContract: mockSimulateWriteContract,
   estimateTransactionFees: mockEstimateTransactionFees as any,
+  estimateTransactionFeesForWrite: mockEstimateTransactionFeesForWrite as any,
 };
 
 const mockEnsureCorrectChain = vi.fn();
@@ -90,9 +93,14 @@ const mockRpcClient = {
   simulateCall: mockRpcSimulateCall,
   getFeeConfig: mockRpcGetFeeConfig,
 };
-const mockNetworkStore = {
+const mockNetworkStore: {
+  isStudio: boolean;
+  rpcUrl: string;
+  chain: { feeManagerContract?: { address: string } };
+} = {
   isStudio: false,
   rpcUrl: 'http://127.0.0.1:4000/api',
+  chain: {},
 };
 
 const mockContractsStore = {
@@ -171,6 +179,7 @@ describe('useContractQueries — behavioral contract', () => {
     vi.clearAllMocks();
     mockNetworkStore.isStudio = false;
     mockNetworkStore.rpcUrl = 'http://127.0.0.1:4000/api';
+    mockNetworkStore.chain = {};
     mockGenlayerClient.estimateTransactionFees = mockEstimateTransactionFees;
     mockRpcGetFeeConfig.mockResolvedValue({
       enabled: true,
@@ -559,6 +568,188 @@ describe('useContractQueries — behavioral contract', () => {
 
       expect(mockWriteContract).not.toHaveBeenCalled();
       expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Network fees (chains with a FeeManager)', () => {
+    const feeManagerChain = {
+      feeManagerContract: {
+        address: '0x10F2d70ABB8F588f96bEB1a02c99163EB75A2CF1',
+      },
+    };
+    const writeEstimate = {
+      policy: { enabled: true },
+      distribution: {
+        leaderTimeunitsAllocation: '120',
+        validatorTimeunitsAllocation: '240',
+        appealRounds: '0',
+        executionBudgetPerRound: '2000000000000000',
+        executionConsumed: '0',
+        totalMessageFees: '22000000000000000',
+        rotations: ['3'],
+        maxPriceGenPerTimeUnit: '2',
+        storageFeeMaxGasPrice: '300000000',
+        receiptFeeMaxGasPrice: '12000000',
+      },
+      messageAllocations: mockMessageAllocations,
+      feeValue: '30000000000000000',
+    };
+
+    it('should attach the SDK estimate to deployments', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract } = useContractQueries();
+
+      await deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3);
+
+      expect(mockEstimateTransactionFees).toHaveBeenCalledTimes(1);
+      expect(mockRpcEstimateTransactionFees).not.toHaveBeenCalled();
+      expect(mockDeployContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fees: expect.objectContaining({
+            feeValue: 120000000000000000n,
+            distribution: expect.objectContaining({
+              executionBudgetPerRound: '100000000000000000',
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('should size write fees with the SDK write estimator', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      mockEstimateTransactionFeesForWrite.mockResolvedValueOnce(writeEstimate);
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await callWriteMethod({
+        method: 'tip',
+        args: { args: [1], kwargs: {} },
+        executionMode: 'NORMAL' as any,
+        value: 5n,
+      });
+
+      expect(mockEstimateTransactionFeesForWrite).toHaveBeenCalledWith({
+        address: '0xContract',
+        functionName: 'tip',
+        args: [1],
+        kwargs: {},
+        value: 5n,
+        leaderOnly: false,
+      });
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+      expect(mockWriteContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fees: {
+            distribution: writeEstimate.distribution,
+            feeValue: 30000000000000000n,
+            messageAllocations: mockMessageAllocations,
+          },
+        }),
+      );
+    });
+
+    it('should use the base estimate when the RPC cannot simulate the write', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      mockEstimateTransactionFeesForWrite.mockRejectedValueOnce(
+        Object.assign(new Error('request failed'), {
+          cause: {
+            code: -32601,
+            message: 'the method gen_call does not exist',
+          },
+        }),
+      );
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await callWriteMethod({
+        method: 'tip',
+        args: { args: [], kwargs: {} },
+        executionMode: 'NORMAL' as any,
+      });
+
+      expect(mockEstimateTransactionFees).toHaveBeenCalledTimes(1);
+      expect(mockWriteContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fees: expect.objectContaining({ feeValue: 120000000000000000n }),
+        }),
+      );
+    });
+
+    it('should not submit a write whose estimate fails', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      mockEstimateTransactionFeesForWrite.mockRejectedValueOnce(
+        new Error('execution failed'),
+      );
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: [], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('execution failed');
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+      expect(mockWriteContract).not.toHaveBeenCalled();
+    });
+
+    it('should simulate writes with the base estimate', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { simulateWriteMethod } = useContractQueries();
+
+      await simulateWriteMethod({
+        method: 'tip',
+        args: { args: [], kwargs: {} },
+      });
+
+      expect(mockEstimateTransactionFeesForWrite).not.toHaveBeenCalled();
+      expect(mockSimulateWriteContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          functionName: 'tip',
+          fees: expect.objectContaining({ feeValue: 120000000000000000n }),
+        }),
+      );
+    });
+
+    it('should omit fees when the fee policy is disabled', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      mockEstimateTransactionFees.mockResolvedValueOnce({
+        policy: { enabled: false },
+        distribution: writeEstimate.distribution,
+        feeValue: '0',
+      });
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract } = useContractQueries();
+
+      await deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3);
+
+      expect(mockDeployContract).toHaveBeenCalledWith(
+        expect.not.objectContaining({ fees: expect.anything() }),
+      );
+    });
+
+    it('should not estimate fees on a chain without a FeeManager', async () => {
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract, callWriteMethod } = useContractQueries();
+
+      await deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3);
+      await callWriteMethod({
+        method: 'tip',
+        args: { args: [], kwargs: {} },
+        executionMode: 'NORMAL' as any,
+      });
+
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFeesForWrite).not.toHaveBeenCalled();
+      expect(mockDeployContract).toHaveBeenCalledWith(
+        expect.not.objectContaining({ fees: expect.anything() }),
+      );
+      expect(mockWriteContract).toHaveBeenCalledWith(
+        expect.not.objectContaining({ fees: expect.anything() }),
+      );
     });
   });
 
