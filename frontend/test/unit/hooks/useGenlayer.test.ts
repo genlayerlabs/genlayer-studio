@@ -28,7 +28,7 @@ const testnetBradburyChain = {
   id: 4221,
   name: 'Genlayer Bradbury Testnet',
   isStudio: false,
-  rpcUrls: { default: { http: ['https://rpc-bradbury.genlayer.com'] } },
+  rpcUrls: { default: { http: ['https://rpc.bradbury.genlayer.com'] } },
 };
 
 const mockNetworkStore = {
@@ -109,7 +109,7 @@ describe('useGenlayer', () => {
 
   it('honors a non-Studio chain (e.g. Bradbury testnet)', async () => {
     mockNetworkStore.chain = testnetBradburyChain;
-    mockNetworkStore.rpcUrl = 'https://rpc-bradbury.genlayer.com';
+    mockNetworkStore.rpcUrl = 'https://rpc.bradbury.genlayer.com';
     mockNetworkStore.currentNetwork = 'testnetBradbury';
 
     vi.resetModules();
@@ -118,7 +118,7 @@ describe('useGenlayer', () => {
 
     const opts = mockCreateClient.mock.calls[0][0];
     expect(opts.chain.isStudio).toBe(false);
-    expect(opts.endpoint).toBe('https://rpc-bradbury.genlayer.com');
+    expect(opts.endpoint).toBe('https://rpc.bradbury.genlayer.com');
   });
 
   it('creates a local account from the private key for local accounts', async () => {

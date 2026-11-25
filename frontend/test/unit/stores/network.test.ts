@@ -47,6 +47,30 @@ describe('useNetworkStore', () => {
     });
   });
 
+  it('sends Bradbury GenLayer RPC calls to the node and keeps the rollup RPC on the chain', () => {
+    const store = useNetworkStore();
+    store.setCurrentNetwork('testnetBradbury');
+
+    expect(store.rpcUrl).toBe('https://rpc.bradbury.genlayer.com');
+    expect(store.chain.rpcUrls.default.http).toEqual([
+      'https://rpc.testnet-chain.genlayer.com',
+    ]);
+    expect(store.chain.consensusMainContract?.address).toBe(
+      '0x0f4F0e05475723790E4a2ed0598370783C300926',
+    );
+  });
+
+  it('lets the deployment override the Bradbury node RPC', () => {
+    window.__RUNTIME_CONFIG__ = {
+      VITE_BRADBURY_NODE_RPC_URL: 'https://node.example.com',
+    };
+
+    const store = useNetworkStore();
+    store.setCurrentNetwork('testnetBradbury');
+
+    expect(store.rpcUrl).toBe('https://node.example.com');
+  });
+
   it('uses runtime Studio chain overrides in the active chain and selector option', () => {
     window.__RUNTIME_CONFIG__ = {
       VITE_GENLAYER_NETWORK: 'studionet',

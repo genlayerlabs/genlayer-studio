@@ -84,6 +84,43 @@ function feesFromStudioEstimate(
   };
 }
 
+type NetworkFeeClient = {
+  estimateTransactionFees?: () => Promise<TrustedFeeEstimate>;
+  estimateTransactionFeesForWrite?: (
+    args: Record<string, unknown>,
+  ) => Promise<TrustedFeeEstimate>;
+};
+
+type NetworkWriteTarget = {
+  method: string;
+  args: CalldataEncodable[];
+  kwargs: { [key: string]: CalldataEncodable };
+  value: bigint;
+  leaderOnly: boolean;
+};
+
+function feesFromNetworkEstimate(estimate: TrustedFeeEstimate) {
+  if (estimate.policy?.enabled === false) {
+    return undefined;
+  }
+  return {
+    distribution: estimate.distribution,
+    feeValue: BigInt(estimate.feeValue),
+    ...(estimate.messageAllocations !== undefined
+      ? { messageAllocations: estimate.messageAllocations }
+      : {}),
+  };
+}
+
+function isRpcMethodNotFound(error: unknown) {
+  let current = error as { code?: unknown; cause?: unknown } | undefined;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (Number(current.code) === -32601) return true;
+    current = current.cause as typeof current;
+  }
+  return false;
+}
+
 function isExpectedSimulationExecutionFailure(error: unknown) {
   return (
     error instanceof JsonRpcServiceError &&
@@ -227,6 +264,39 @@ export function useContractQueries() {
     };
   }
 
+  // Networks with a FeeManager reject transactions sent without fees.
+  async function getNetworkFees(write?: NetworkWriteTarget) {
+    if (!networkStore.chain.feeManagerContract?.address) {
+      return undefined;
+    }
+
+    const client = genlayerClient.value as unknown as
+      | NetworkFeeClient
+      | undefined;
+    if (write && client?.estimateTransactionFeesForWrite) {
+      try {
+        return feesFromNetworkEstimate(
+          await client.estimateTransactionFeesForWrite({
+            address: address.value,
+            functionName: write.method,
+            args: write.args,
+            kwargs: write.kwargs,
+            value: write.value,
+            leaderOnly: write.leaderOnly,
+          }),
+        );
+      } catch (error) {
+        // An RPC without gen_call cannot size the write; use the base estimate.
+        if (!isRpcMethodNotFound(error)) throw error;
+      }
+    }
+
+    if (!client?.estimateTransactionFees) {
+      return undefined;
+    }
+    return feesFromNetworkEstimate(await client.estimateTransactionFees());
+  }
+
   async function getStudioWriteFees({
     method,
     args,
@@ -360,7 +430,7 @@ export function useContractQueries() {
             kwargs: args.kwargs,
             leaderOnly,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees();
 
       const result = await genlayerClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
@@ -499,7 +569,13 @@ export function useContractQueries() {
             value,
             leaderOnly,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees({
+            method,
+            args: args.args,
+            kwargs: args.kwargs,
+            value,
+            leaderOnly,
+          });
 
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,
@@ -555,7 +631,7 @@ export function useContractQueries() {
             value: value ?? 0n,
             leaderOnly: false,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees();
       const from =
         accountsStore.selectedAccount?.address ||
         '0x0000000000000000000000000000000000000000';
