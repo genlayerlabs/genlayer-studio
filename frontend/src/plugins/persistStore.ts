@@ -1,32 +1,64 @@
 import type { ContractFile, DeployedContract, TransactionItem } from '@/types';
 import { type PiniaPluginContext } from 'pinia';
 import { useDb, useFileName } from '@/hooks';
+import { useNetworkStore } from '@/stores/network';
 import { toRaw } from 'vue';
 
 const ENABLE_LOGS = false;
 const db = useDb();
 const { cleanupFileName } = useFileName();
 
+// IndexedDB cannot clone Vue proxies, at any depth.
+function toPlain<T>(value: T): T {
+  const raw = toRaw(value);
+  if (Array.isArray(raw)) {
+    return raw.map(toPlain) as T;
+  }
+  if (raw !== null && typeof raw === 'object') {
+    const proto = Object.getPrototypeOf(raw);
+    if (proto === Object.prototype || proto === null) {
+      return Object.fromEntries(
+        Object.entries(raw).map(([key, item]) => [key, toPlain(item)]),
+      ) as T;
+    }
+  }
+  return raw;
+}
+
+// Rows saved without a chain belong to whichever chain is asking.
+const deployedContractsOnChain = (contractId: string, chainId: number) =>
+  db.deployedContracts
+    .where('contractId')
+    .equals(contractId)
+    .filter((row) => (row.chainId ?? chainId) === chainId);
+
 /**
  * Upserts a deployed contract into the database.
  *
  * @param {DeployedContract} contract - The contract to upsert.
+ * @param {number} chainId - The chain the contract was deployed on.
  * @return {Promise<void>} A Promise that resolves once the contract is upserted.
  */
 const upsertDeployedContract = async (
   contract: DeployedContract,
+  chainId: number,
 ): Promise<void> => {
-  const existingContract = await db.deployedContracts
-    .where('contractId')
-    .equals(contract.contractId)
-    .first();
-  if (existingContract) {
-    await db.deployedContracts
-      .where('contractId')
-      .equals(contract.contractId)
-      .modify(contract);
+  const record = toPlain({ ...contract, chainId });
+  const existing = deployedContractsOnChain(contract.contractId, chainId);
+  const sameKey = await db.deployedContracts.get([
+    contract.contractId,
+    contract.address,
+  ]);
+  if (sameKey && (sameKey.chainId ?? chainId) !== chainId) {
+    // The key has no chain, so one row without a chain serves every chain.
+    await existing.delete();
+    await db.deployedContracts.put({ ...record, chainId: undefined });
+    return;
+  }
+  if ((await existing.count()) > 0) {
+    await existing.modify(record);
   } else {
-    await db.deployedContracts.add(contract);
+    await db.deployedContracts.add(record);
   }
 };
 
@@ -96,7 +128,13 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
             );
             break;
           case 'addDeployedContract':
-            await upsertDeployedContract(args[0] as DeployedContract);
+            {
+              const contract = args[0] as DeployedContract;
+              await upsertDeployedContract(
+                contract,
+                contract.chainId ?? useNetworkStore().chainId,
+              );
+            }
             break;
           case 'setCurrentContractId':
             localStorage.setItem(
@@ -106,10 +144,10 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
             break;
 
           case 'removeDeployedContract':
-            await db.deployedContracts
-              .where('contractId')
-              .equals(args[0] as string)
-              .delete();
+            await deployedContractsOnChain(
+              args[0] as string,
+              useNetworkStore().chainId,
+            ).delete();
             break;
           default:
             break;
@@ -139,8 +177,10 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
         switch (name) {
           case 'addTransaction':
             await db.transactions.add(
-              transactions.find((t) => t.hash === (args[0] as any).hash) ??
-                args[0],
+              toPlain(
+                transactions.find((t) => t.hash === (args[0] as any).hash) ??
+                  args[0],
+              ),
             );
             break;
           case 'removeTransaction':
@@ -158,7 +198,7 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
                   .where('hash')
                   .equals(transaction.hash)
                   .modify({
-                    data: transaction.data,
+                    data: toPlain(transaction.data),
                     statusName: transaction.statusName,
                     addedAt: transaction.addedAt,
                   });
