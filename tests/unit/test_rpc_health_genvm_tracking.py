@@ -199,6 +199,7 @@ class TestBackgroundHealthGenVMOrdering:
         health_module._health_cache = health_module.HealthCache()
         health_module._genvm_consecutive_failures = 0
         health_module._no_progress_scan_suppressed_until = 0.0
+        health_module._total_counts_refreshed_monotonic = None
 
     def _install_fake_consensus_db(
         self,
@@ -358,9 +359,12 @@ class TestBackgroundHealthGenVMOrdering:
             health_module, "_check_redis_health", AsyncMock(return_value="healthy")
         )
         monkeypatch.setattr(
+            health_module, "_get_total_counts", AsyncMock(return_value=(1, 2))
+        )
+        monkeypatch.setattr(
             health_module,
-            "_get_aggregate_counts",
-            AsyncMock(return_value=(1, 2, 3)),
+            "_get_pending_transactions_count",
+            AsyncMock(return_value=3),
         )
         monkeypatch.setattr(
             health_module, "_get_pending_contracts", AsyncMock(return_value=[])
@@ -377,6 +381,9 @@ class TestBackgroundHealthGenVMOrdering:
         assert health_module._health_cache.genvm_max_permits == 5
         assert health_module._health_cache.genvm_available_permits == 4
         assert health_module._health_cache.genvm_active_executions == 1
+        assert health_module._health_cache.total_decisions == 1
+        assert health_module._health_cache.total_users == 2
+        assert health_module._health_cache.pending_transactions == 3
 
     @pytest.mark.asyncio
     async def test_consensus_health_includes_max_recovery_exhaustion_events(
@@ -484,6 +491,129 @@ class TestBackgroundHealthGenVMOrdering:
         assert result["no_progress_backlog_count"] == 1
         assert result["oldest_backlog_age_seconds"] is None
         assert health_module._no_progress_scan_suppressed_until == 0.0
+
+
+class TestHealthCheckDatabaseLoad:
+    """Full-table totals and metrics reports follow the wall clock."""
+
+    def setup_method(self):
+        health_module._health_cache = health_module.HealthCache()
+        health_module._total_counts_refreshed_monotonic = None
+        health_module._metrics_last_send_monotonic = None
+
+    def teardown_method(self):
+        health_module._total_counts_refreshed_monotonic = None
+        health_module._metrics_last_send_monotonic = None
+        health_module._usage_metrics_service_ref = None
+
+    def _fake_clock(self, monkeypatch, start=1000.0):
+        clock = {"now": start}
+        monkeypatch.setattr(
+            health_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: clock["now"], time=lambda: clock["now"]),
+        )
+        return clock
+
+    @pytest.mark.asyncio
+    async def test_total_counts_refresh_once_per_interval(self, monkeypatch):
+        monkeypatch.setenv("HEALTH_TOTAL_COUNTS_REFRESH_SECONDS", "300")
+        clock = self._fake_clock(monkeypatch)
+        totals = AsyncMock(side_effect=[(10, 4), (12, 5)])
+        monkeypatch.setattr(health_module, "_get_total_counts", totals)
+
+        await health_module._refresh_total_counts_if_due()
+        clock["now"] += 299
+        await health_module._refresh_total_counts_if_due()
+
+        assert totals.await_count == 1
+        assert health_module._health_cache.total_decisions == 10
+        assert health_module._health_cache.total_users == 4
+
+        clock["now"] += 1
+        await health_module._refresh_total_counts_if_due()
+
+        assert totals.await_count == 2
+        assert health_module._health_cache.total_decisions == 12
+        assert health_module._health_cache.total_users == 5
+
+    @pytest.mark.asyncio
+    async def test_failed_total_counts_keep_previous_values_until_next_interval(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HEALTH_TOTAL_COUNTS_REFRESH_SECONDS", "300")
+        clock = self._fake_clock(monkeypatch)
+        health_module._health_cache.total_decisions = 10
+        health_module._health_cache.total_users = 4
+        totals = AsyncMock(return_value=None)
+        monkeypatch.setattr(health_module, "_get_total_counts", totals)
+
+        await health_module._refresh_total_counts_if_due()
+        clock["now"] += 10
+        await health_module._refresh_total_counts_if_due()
+
+        assert totals.await_count == 1
+        assert health_module._health_cache.total_decisions == 10
+        assert health_module._health_cache.total_users == 4
+
+    @pytest.mark.asyncio
+    async def test_failed_pending_count_keeps_previous_value(self, monkeypatch):
+        health_module._health_cache.pending_transactions = 7
+        fakes = {
+            "_check_genvm_health": (True, None, {}),
+            "_check_database_health": {"status": "healthy"},
+            "_check_consensus_health": {"status": "healthy"},
+            "_check_llm_provider_health": {"status": "no_data"},
+            "_check_memory_health": {"status": "healthy"},
+            "_check_redis_health": "healthy",
+            "_get_total_counts": (1, 2),
+            "_get_pending_contracts": [],
+            "_get_pending_transactions_count": None,
+        }
+        for name, value in fakes.items():
+            monkeypatch.setattr(health_module, name, AsyncMock(return_value=value))
+
+        await health_module._run_health_checks()
+
+        assert health_module._health_cache.error is None
+        assert health_module._health_cache.total_decisions == 1
+        assert health_module._health_cache.pending_transactions == 7
+
+    def test_health_metrics_send_uses_wall_clock_interval(self, monkeypatch):
+        monkeypatch.setenv("HEALTH_METRICS_SEND_INTERVAL_SECONDS", "60")
+
+        assert health_module._should_send_health_metrics(100.0) is True
+
+        health_module._metrics_last_send_monotonic = 100.0
+        assert health_module._should_send_health_metrics(159.9) is False
+        assert health_module._should_send_health_metrics(160.0) is True
+
+    @pytest.mark.asyncio
+    async def test_slow_check_cycles_do_not_delay_metrics_reports(self, monkeypatch):
+        monkeypatch.setenv("HEALTH_METRICS_SEND_INTERVAL_SECONDS", "60")
+        clock = self._fake_clock(monkeypatch)
+        service = SimpleNamespace(enabled=True, send_system_health_metrics=AsyncMock())
+        health_module._usage_metrics_service_ref = service
+
+        async def slow_checks():
+            clock["now"] += 20
+
+        cycles = {"count": 0}
+
+        async def fake_sleep(_seconds):
+            cycles["count"] += 1
+            if cycles["count"] >= 6:
+                raise health_module.asyncio.CancelledError()
+            clock["now"] += 10
+
+        monkeypatch.setattr(health_module, "_run_health_checks", slow_checks)
+        monkeypatch.setattr(health_module.asyncio, "sleep", fake_sleep)
+
+        with pytest.raises(health_module.asyncio.CancelledError):
+            await health_module._background_health_loop()
+
+        # 6 cycles of 30s: the old every-6th-cycle rule would have sent once.
+        assert service.send_system_health_metrics.await_count == 3
 
 
 class TestDetailedConsensusHealthEndpoint:
