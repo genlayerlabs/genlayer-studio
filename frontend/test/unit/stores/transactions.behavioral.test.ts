@@ -27,6 +27,7 @@ const mockDb = {
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(() => ({
     client: { value: mockGenlayerClient },
+    transactionClient: { value: mockGenlayerClient },
   })),
   useRpcClient: vi.fn(() => ({
     cancelTransaction: vi.fn(() => Promise.resolve({ status: 'CANCELED' })),

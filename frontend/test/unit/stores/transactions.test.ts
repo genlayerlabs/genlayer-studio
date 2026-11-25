@@ -88,6 +88,7 @@ describe('useTransactionsStore', () => {
     setActivePinia(createPinia());
     (useGenlayer as Mock).mockReturnValue({
       client: { value: mockGenlayerClient },
+      transactionClient: { value: mockGenlayerClient },
     });
     (useDb as Mock).mockReturnValue(mockDb);
 

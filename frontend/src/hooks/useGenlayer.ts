@@ -7,6 +7,7 @@ import { useWallet } from './useWallet';
 
 type UseGenlayerReturn = {
   client: Ref<GenLayerClient<any> | null>;
+  transactionClient: Ref<GenLayerClient<any> | null>;
   initClient: () => void;
 };
 
@@ -15,6 +16,7 @@ export function useGenlayer(): UseGenlayerReturn {
   const networkStore = useNetworkStore();
   const wallet = useWallet();
   const client = ref<GenLayerClient<any> | null>(null);
+  const transactionClient = ref<GenLayerClient<any> | null>(null);
 
   if (!client.value) {
     initClient();
@@ -26,6 +28,7 @@ export function useGenlayer(): UseGenlayerReturn {
       () => wallet.walletProvider.value,
       () => networkStore.currentNetwork,
       () => networkStore.rpcUrl,
+      () => networkStore.transactionRpcUrl,
     ],
     () => {
       initClient();
@@ -40,7 +43,6 @@ export function useGenlayer(): UseGenlayerReturn {
 
     const clientOptions: Record<string, unknown> = {
       chain: networkStore.chain,
-      endpoint: networkStore.rpcUrl,
       account: clientAccount,
     };
 
@@ -52,11 +54,21 @@ export function useGenlayer(): UseGenlayerReturn {
       clientOptions.provider = wallet.walletProvider.value;
     }
 
-    client.value = markRaw(createClient(clientOptions as any));
+    const buildClient = (endpoint: string) =>
+      markRaw(createClient({ ...clientOptions, endpoint } as any));
+    const transactionRpcUrl =
+      networkStore.transactionRpcUrl || networkStore.rpcUrl;
+
+    client.value = buildClient(networkStore.rpcUrl);
+    transactionClient.value =
+      transactionRpcUrl === networkStore.rpcUrl
+        ? client.value
+        : buildClient(transactionRpcUrl);
   }
 
   return {
     client,
+    transactionClient,
     initClient,
   };
 }

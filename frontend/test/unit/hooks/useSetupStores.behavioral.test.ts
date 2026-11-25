@@ -86,6 +86,7 @@ const mockContractListener = {
 };
 const mockGenlayer = {
   client: { value: {} },
+  transactionClient: { value: {} },
   initClient: vi.fn(() => track('initClient')),
 };
 
