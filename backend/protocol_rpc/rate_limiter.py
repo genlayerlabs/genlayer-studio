@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 import redis.asyncio as aioredis
 from redis.exceptions import NoScriptError
-from sqlalchemy import func
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -115,6 +115,16 @@ class TierLimits:
             rate_limit_hour=self.rate_limit_hour * factor,
             rate_limit_day=self.rate_limit_day * factor,
         )
+
+
+_TOUCH_LAST_USED_SQL = text(
+    """
+    UPDATE api_keys SET last_used_at = now()
+    WHERE id IN (
+        SELECT id FROM api_keys WHERE id = :id FOR UPDATE SKIP LOCKED
+    )
+    """
+)
 
 
 @dataclass(frozen=True)
@@ -241,67 +251,72 @@ class RateLimiterService:
         self, raw_key: str, use_cache: bool = True
     ) -> Optional[int]:
         """Identify an API key without metering it; reads the DB if the cache fails."""
-        if use_cache:
-            try:
-                resolved = await self._resolve_api_key(raw_key)
-                return resolved.id if resolved is not None else None
-            except Exception:
-                logger.warning(
-                    "API key cache unavailable, resolving from the database",
-                    exc_info=True,
-                )
-        # Off the event loop: during a cache outage this runs on every keyed request.
-        return await run_in_threadpool(self._lookup_api_key_id, raw_key)
+        resolved = await self._resolve_api_key(
+            raw_key, use_cache=use_cache, cache_required=False
+        )
+        return resolved.id if resolved is not None else None
 
-    def _lookup_api_key_id(self, raw_key: str) -> Optional[int]:
-        # Read only: no cache write and no last_used_at touch.
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-        session = self._get_session()
-        try:
-            return (
-                session.query(ApiKey.id)
-                .filter_by(key_hash=key_hash, is_active=True)
-                .scalar()
-            )
-        finally:
-            session.close()
-
-    async def _resolve_api_key(self, raw_key: str) -> Optional[ResolvedApiKey]:
+    async def _resolve_api_key(
+        self, raw_key: str, use_cache: bool = True, cache_required: bool = True
+    ) -> Optional[ResolvedApiKey]:
         """Look up API key id and tier, using Redis cache."""
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         cache_key = f"ratelimit:tier:{key_hash}"
         identity = f"key:{key_hash[:16]}"
 
-        # Try cache first
-        cached = await self._redis.hgetall(cache_key)
-        if cached:
-            if cached.get("status") == "inactive":
-                return None
-            # Entries written before the id was cached fall through to the DB.
-            if cached.get("id"):
-                return ResolvedApiKey(
-                    id=int(cached["id"]),
-                    identity=identity,
-                    limits=TierLimits(
-                        name=cached["name"],
-                        rate_limit_minute=int(cached["rpm"]),
-                        rate_limit_hour=int(cached["rph"]),
-                        rate_limit_day=int(cached["rpd"]),
-                    ),
+        if use_cache:
+            try:
+                cached = await self._redis.hgetall(cache_key)
+            except Exception:
+                if cache_required:
+                    raise
+                logger.warning(
+                    "API key cache unavailable, resolving from the database",
+                    exc_info=True,
                 )
+                cached, use_cache = None, False
+            if cached:
+                if cached.get("status") == "inactive":
+                    return None
+                # Entries written before the id was cached fall through to the DB.
+                if cached.get("id"):
+                    return ResolvedApiKey(
+                        id=int(cached["id"]),
+                        identity=identity,
+                        limits=TierLimits(
+                            name=cached["name"],
+                            rate_limit_minute=int(cached["rpm"]),
+                            rate_limit_hour=int(cached["rph"]),
+                            rate_limit_day=int(cached["rpd"]),
+                        ),
+                    )
 
-        # Cache miss: query DB
+        # Off the event loop: a sync query here can wait on locks held by coroutines.
+        is_active, resolved = await run_in_threadpool(
+            self._load_api_key, key_hash, identity, use_cache
+        )
+        if use_cache:
+            try:
+                await self._cache_api_key(cache_key, is_active, resolved)
+            except Exception:
+                if cache_required:
+                    raise
+                logger.warning("Could not cache API key resolution", exc_info=True)
+        return resolved
+
+    def _load_api_key(
+        self, key_hash: str, identity: str, touch: bool
+    ) -> tuple[bool, Optional[ResolvedApiKey]]:
+        """Read the key from the DB: (key is active, resolved or None without a tier)."""
         session = self._get_session()
         try:
             api_key_row = session.query(ApiKey).filter_by(key_hash=key_hash).first()
             if api_key_row is None or not api_key_row.is_active:
-                await self._redis.hset(cache_key, mapping={"status": "inactive"})
-                await self._redis.expire(cache_key, TIER_CACHE_TTL)
-                return None
+                return False, None
 
             tier = session.query(ApiTier).filter_by(id=api_key_row.tier_id).first()
             if tier is None:
-                return None
+                return True, None
 
             resolved = ResolvedApiKey(
                 id=api_key_row.id,
@@ -313,30 +328,37 @@ class RateLimiterService:
                     rate_limit_day=tier.rate_limit_day,
                 ),
             )
-            self._touch_last_used(session, api_key_row)
-
-            await self._redis.hset(
-                cache_key,
-                mapping={
-                    "status": "active",
-                    "id": str(resolved.id),
-                    "name": resolved.limits.name,
-                    "rpm": str(resolved.limits.rate_limit_minute),
-                    "rph": str(resolved.limits.rate_limit_hour),
-                    "rpd": str(resolved.limits.rate_limit_day),
-                },
-            )
-            await self._redis.expire(cache_key, TIER_CACHE_TTL)
-
-            return resolved
+            # Only with a working cache, so this stays one write per TIER_CACHE_TTL.
+            if touch:
+                self._touch_last_used(session, resolved.id)
+            return True, resolved
         finally:
             session.close()
 
+    async def _cache_api_key(
+        self, cache_key: str, is_active: bool, resolved: Optional[ResolvedApiKey]
+    ) -> None:
+        if not is_active:
+            mapping = {"status": "inactive"}
+        elif resolved is not None:
+            mapping = {
+                "status": "active",
+                "id": str(resolved.id),
+                "name": resolved.limits.name,
+                "rpm": str(resolved.limits.rate_limit_minute),
+                "rph": str(resolved.limits.rate_limit_hour),
+                "rpd": str(resolved.limits.rate_limit_day),
+            }
+        else:
+            return
+        await self._redis.hset(cache_key, mapping=mapping)
+        await self._redis.expire(cache_key, TIER_CACHE_TTL)
+
     @staticmethod
-    def _touch_last_used(session: Session, api_key_row: ApiKey) -> None:
-        # Runs on cache misses only, so last_used_at is accurate to TIER_CACHE_TTL.
+    def _touch_last_used(session: Session, api_key_id: int) -> None:
+        # SKIP LOCKED: never wait behind a concurrent change to the same key.
         try:
-            api_key_row.last_used_at = func.now()
+            session.execute(_TOUCH_LAST_USED_SQL, {"id": api_key_id})
             session.commit()
         except Exception:
             session.rollback()

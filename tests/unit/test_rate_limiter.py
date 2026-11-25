@@ -1,7 +1,5 @@
 """Unit tests for RateLimiterService."""
 
-import hashlib
-
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -282,13 +280,6 @@ def _make_service_with_session(redis, session, enabled=True):
     )
 
 
-def _make_lookup_session(api_key_id):
-    """Mock session for the direct id lookup used when the cache is skipped."""
-    session = MagicMock()
-    session.query.return_value.filter_by.return_value.scalar.return_value = api_key_id
-    return session
-
-
 class TestApiKeyIdentification:
     @pytest.mark.asyncio
     async def test_anonymous_usage_has_no_api_key_id(self):
@@ -331,13 +322,14 @@ class TestApiKeyIdentification:
     @pytest.mark.asyncio
     async def test_cache_miss_touches_last_used_at(self):
         redis = _make_redis_mock()
-        session, api_key = _make_db_session()
-        api_key.last_used_at = None
+        session, _ = _make_db_session(api_key_id=42)
         service = _make_service_with_session(redis, session)
 
         await service.check_rate_limit("glk_test1234", "1.2.3.4")
 
-        assert api_key.last_used_at is not None
+        statement, params = session.execute.call_args.args
+        assert "SKIP LOCKED" in str(statement)
+        assert params == {"id": 42}
         session.commit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -373,11 +365,12 @@ class TestApiKeyIdentification:
     async def test_cache_failure_falls_back_to_the_database(self):
         redis = _make_redis_mock()
         redis.hgetall = AsyncMock(side_effect=ConnectionError("redis down"))
-        session = _make_lookup_session(42)
+        session, _ = _make_db_session(api_key_id=42)
         service = _make_service_with_session(redis, session, enabled=False)
 
         assert await service.resolve_api_key_id("glk_test1234") == 42
         redis.hset.assert_not_called()
+        session.execute.assert_not_called()
         session.commit.assert_not_called()
         session.close.assert_called_once()
 
@@ -386,34 +379,39 @@ class TestApiKeyIdentification:
         redis = _make_redis_mock()
         redis.hset = AsyncMock(side_effect=ConnectionError("redis down"))
         session, _ = _make_db_session(api_key_id=42)
-        session.query.return_value.filter_by.return_value.scalar.return_value = 42
-        lookup = _make_lookup_session(42)
-        sessions = iter([session, lookup])
-        service = RateLimiterService(
-            redis_client=redis, get_session=lambda: next(sessions), enabled=False
-        )
+        service = _make_service_with_session(redis, session, enabled=False)
 
         assert await service.resolve_api_key_id("glk_test1234") == 42
 
     @pytest.mark.asyncio
     async def test_database_lookup_can_skip_the_cache(self):
         redis = _make_redis_mock()
-        session = _make_lookup_session(42)
+        session, _ = _make_db_session(api_key_id=42)
         service = _make_service_with_session(redis, session)
 
         assert await service.resolve_api_key_id("glk_test1234", use_cache=False) == 42
         redis.hgetall.assert_not_called()
-        session.query.return_value.filter_by.assert_called_once_with(
-            key_hash=hashlib.sha256(b"glk_test1234").hexdigest(), is_active=True
-        )
+        redis.hset.assert_not_called()
+        session.commit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_database_lookup_ignores_unknown_keys(self):
-        service = _make_service_with_session(
-            _make_redis_mock(), _make_lookup_session(None)
-        )
+        session = MagicMock()
+        session.query.return_value.filter_by.return_value.first.return_value = None
+        service = _make_service_with_session(_make_redis_mock(), session)
 
         assert await service.resolve_api_key_id("glk_nope", use_cache=False) is None
+
+    @pytest.mark.asyncio
+    async def test_metering_still_fails_when_the_cache_is_down(self):
+        redis = _make_redis_mock()
+        redis.hgetall = AsyncMock(side_effect=ConnectionError("redis down"))
+        session, _ = _make_db_session(api_key_id=42)
+        service = _make_service_with_session(redis, session)
+
+        with pytest.raises(ConnectionError):
+            await service.check_rate_limit("glk_test1234", "1.2.3.4")
+        session.query.assert_not_called()
 
 
 class TestInvalidateCache:

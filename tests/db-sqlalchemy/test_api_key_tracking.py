@@ -254,6 +254,47 @@ class TestAdminAccess:
         assert len(usage["keys"]) == 2
 
 
+def _limiter(engine, redis=None, enabled=False):
+    if redis is None:
+        redis = AsyncMock()
+        redis.hgetall = AsyncMock(return_value={})
+    return RateLimiterService(
+        redis_client=redis, get_session=sessionmaker(bind=engine), enabled=enabled
+    )
+
+
+def _last_used_at(session, api_key):
+    session.expire_all()
+    return session.get(ApiKey, api_key.id).last_used_at
+
+
+class TestKeyResolution:
+    def test_cache_miss_touches_last_used_at(self, engine, session, api_keys):
+        service = _limiter(engine)
+
+        assert asyncio.run(service.resolve_api_key_id("glk_aaaa")) == api_keys[0].id
+        assert _last_used_at(session, api_keys[0]) is not None
+
+    def test_locked_key_is_resolved_without_waiting(self, engine, session, api_keys):
+        """A key locked by an open transaction (e.g. being deactivated) must not block."""
+        service = _limiter(engine)
+        with engine.connect() as locker:
+            locker.execute(
+                text("SELECT id FROM api_keys WHERE id = :id FOR UPDATE"),
+                {"id": api_keys[0].id},
+            )
+
+            async def resolve():
+                return await asyncio.wait_for(
+                    service.resolve_api_key_id("glk_aaaa"), timeout=5
+                )
+
+            assert asyncio.run(resolve()) == api_keys[0].id
+            locker.rollback()
+
+        assert _last_used_at(session, api_keys[0]) is None
+
+
 class TestDatabaseFallback:
     """Key identification when the Redis cache is unavailable."""
 
@@ -261,9 +302,7 @@ class TestDatabaseFallback:
     def _service(engine):
         redis = AsyncMock()
         redis.hgetall = AsyncMock(side_effect=ConnectionError("redis down"))
-        return RateLimiterService(
-            redis_client=redis, get_session=sessionmaker(bind=engine), enabled=False
-        )
+        return _limiter(engine, redis)
 
     def test_active_key_is_identified_without_the_cache(self, engine, api_keys):
         service = self._service(engine)
@@ -287,8 +326,7 @@ class TestDatabaseFallback:
 
         asyncio.run(service.resolve_api_key_id("glk_aaaa"))
 
-        session.expire_all()
-        assert session.get(ApiKey, api_keys[0].id).last_used_at is None
+        assert _last_used_at(session, api_keys[0]) is None
 
 
 def test_api_key_index_is_valid_and_partial(session):
