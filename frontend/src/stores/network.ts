@@ -28,6 +28,9 @@ const CHAINS: Record<NetworkName, GenLayerChain> = {
 
 const STORAGE_KEY = 'networkStore.currentNetwork';
 
+// The Bradbury preset points at the rollup RPC, which serves no gen_* methods.
+const BRADBURY_NODE_RPC_URL = 'https://rpc-bradbury.genlayer.com';
+
 // v1 ships one deployment-configured Studio network + Bradbury as
 // runtime-selectable options. Asimov shares Bradbury's chain ID so it is not
 // exposed as a separate dropdown entry; reachable only via a deployment-time
@@ -100,6 +103,12 @@ export const useNetworkStore = defineStore('networkStore', () => {
       return getRuntimeConfig(
         'VITE_JSON_RPC_SERVER_URL',
         chain.value.rpcUrls?.default?.http?.[0] ?? 'http://127.0.0.1:4000/api',
+      );
+    }
+    if (currentNetwork.value === 'testnetBradbury') {
+      return getRuntimeConfig(
+        'VITE_BRADBURY_NODE_RPC_URL',
+        BRADBURY_NODE_RPC_URL,
       );
     }
     return chain.value.rpcUrls?.default?.http?.[0] ?? '';
