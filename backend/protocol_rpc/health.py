@@ -108,7 +108,8 @@ _health_cache = HealthCache()
 _background_task: Optional[asyncio.Task] = None
 _rpc_router_ref: Optional[FastAPIRPCRouter] = None
 _usage_metrics_service_ref: Optional[Any] = None
-_metrics_send_counter: int = 0
+_metrics_last_send_monotonic: Optional[float] = None
+_total_counts_refreshed_monotonic: Optional[float] = None
 
 # =============================================================================
 # Permit-aware readiness state (in-process)
@@ -214,8 +215,6 @@ def _evaluate_permit_readiness(
     return True, "permits_recovering"
 
 
-# Send system health metrics every 6 health checks (6 × 10s = 60s = 1 minute)
-METRICS_SEND_INTERVAL = 6
 _no_progress_scan_suppressed_until: float = 0.0
 
 # Statuses where the consensus state machine is actively working.
@@ -242,6 +241,25 @@ PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
 def get_health_check_interval() -> float:
     """Get health check interval from env (default 10s)."""
     return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
+
+
+def get_metrics_send_interval_seconds() -> float:
+    """Wall-clock interval between external health metrics sends."""
+    return float(os.getenv("HEALTH_METRICS_SEND_INTERVAL_SECONDS", "60"))
+
+
+def _should_send_health_metrics(now_monotonic: float) -> bool:
+    if _metrics_last_send_monotonic is None:
+        return True
+    return (
+        now_monotonic - _metrics_last_send_monotonic
+        >= get_metrics_send_interval_seconds()
+    )
+
+
+def get_total_counts_refresh_seconds() -> float:
+    """Interval between refreshes of the full-table totals (decisions, users)."""
+    return float(os.getenv("HEALTH_TOTAL_COUNTS_REFRESH_SECONDS", "300"))
 
 
 def get_no_progress_scan_error_cooldown_seconds() -> float:
@@ -436,11 +454,11 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("redis_unreachable")
 
-        # 7. Aggregate counts for metrics
-        decisions_count, users_count, pending_count = await _get_aggregate_counts()
-        _health_cache.total_decisions = decisions_count
-        _health_cache.total_users = users_count
-        _health_cache.pending_transactions = pending_count
+        # 7. Counts for metrics
+        pending_count = await _get_pending_transactions_count()
+        if pending_count is not None:
+            _health_cache.pending_transactions = pending_count
+        await _refresh_total_counts_if_due()
         _health_cache.uptime_percent = 100.0  # 100% while running
 
         # 8. Get pending contracts breakdown for dashboard
@@ -464,7 +482,7 @@ async def _run_health_checks() -> None:
 
 async def _background_health_loop() -> None:
     """Background loop that periodically runs health checks."""
-    global _metrics_send_counter
+    global _metrics_last_send_monotonic
 
     interval = get_health_check_interval()
     logger.info(f"Starting background health checker (interval={interval}s)")
@@ -473,17 +491,20 @@ async def _background_health_loop() -> None:
         try:
             await _run_health_checks()
 
-            # Send system health metrics every 1 minute (every 6th iteration)
-            _metrics_send_counter += 1
-            if _metrics_send_counter >= METRICS_SEND_INTERVAL:
-                _metrics_send_counter = 0
-                if _usage_metrics_service_ref and _usage_metrics_service_ref.enabled:
-                    try:
-                        await _usage_metrics_service_ref.send_system_health_metrics(
-                            _health_cache
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to send system health metrics: {e}")
+            # Wall-clock cadence: a slow check cycle must not delay reports.
+            now_monotonic = time.monotonic()
+            if (
+                _usage_metrics_service_ref
+                and _usage_metrics_service_ref.enabled
+                and _should_send_health_metrics(now_monotonic)
+            ):
+                _metrics_last_send_monotonic = now_monotonic
+                try:
+                    await _usage_metrics_service_ref.send_system_health_metrics(
+                        _health_cache
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send system health metrics: {e}")
 
         except asyncio.CancelledError:
             logger.info("Background health checker cancelled")
@@ -1480,8 +1501,27 @@ async def _check_memory_health() -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
-async def _get_aggregate_counts() -> tuple[int, int, int]:
-    """Query total decisions, unique users, and pending transactions from database."""
+async def _get_pending_transactions_count() -> Optional[int]:
+    """Count PENDING transactions (indexed, cheap enough for every cycle)."""
+    from sqlalchemy import text
+
+    def _query():
+        db_manager = get_database_manager()
+        with db_manager.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT COUNT(*) FROM transactions WHERE status = 'PENDING'")
+            ).fetchone()
+            return int(row[0] or 0) if row else 0
+
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as e:
+        logger.warning(f"Failed to get pending transactions count: {e}")
+        return None
+
+
+async def _get_total_counts() -> Optional[tuple[int, int]]:
+    """Query total decisions and unique users. Scans the whole table."""
     from sqlalchemy import text
 
     def _query():
@@ -1491,24 +1531,37 @@ async def _get_aggregate_counts() -> tuple[int, int, int]:
                 """
                 SELECT
                     COUNT(*) FILTER (WHERE status IN ('FINALIZED', 'ACCEPTED')) as decisions,
-                    COUNT(DISTINCT from_address) as users,
-                    COUNT(*) FILTER (WHERE status = 'PENDING') as pending
+                    COUNT(DISTINCT from_address) as users
                 FROM transactions
             """
             )
-            result = conn.execute(query)
-            row = result.fetchone()
-            return (
-                (row.decisions or 0, row.users or 0, row.pending or 0)
-                if row
-                else (0, 0, 0)
-            )
+            row = conn.execute(query).fetchone()
+            return (row.decisions or 0, row.users or 0) if row else (0, 0)
 
     try:
         return await asyncio.to_thread(_query)
     except Exception as e:
-        logger.warning(f"Failed to get aggregate counts: {e}")
-        return (0, 0, 0)
+        logger.warning(f"Failed to get total counts: {e}")
+        return None
+
+
+async def _refresh_total_counts_if_due() -> None:
+    """Refresh the full-table totals at most once per refresh interval."""
+    global _total_counts_refreshed_monotonic
+
+    now_monotonic = time.monotonic()
+    if (
+        _total_counts_refreshed_monotonic is not None
+        and now_monotonic - _total_counts_refreshed_monotonic
+        < get_total_counts_refresh_seconds()
+    ):
+        return
+
+    # Stamp before querying so a failing scan is not retried every cycle.
+    _total_counts_refreshed_monotonic = now_monotonic
+    totals = await _get_total_counts()
+    if totals is not None:
+        _health_cache.total_decisions, _health_cache.total_users = totals
 
 
 async def _get_pending_contracts() -> list[dict]:
