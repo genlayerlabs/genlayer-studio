@@ -5,6 +5,33 @@ import { useNetworkStore } from '@/stores/network';
 import { useWallet } from './useWallet';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
+export class ChainMismatchError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ChainMismatchError';
+  }
+}
+
+/**
+ * Human-readable explanation of a wallet/Studio chain mismatch, shown to the
+ * user when the wallet cannot be (or refuses to be) switched to the network
+ * Studio is configured for.
+ */
+export function chainMismatchMessage(
+  walletChainId: number,
+  targetChainId: number,
+  targetChainName: string,
+): string {
+  const walletChain = Number.isNaN(walletChainId)
+    ? 'an unknown chain'
+    : `chain ID ${walletChainId}`;
+  return (
+    `Your wallet is connected to ${walletChain}, but ${targetChainName} ` +
+    `uses chain ID ${targetChainId}. Switch your wallet to ${targetChainName} ` +
+    `(chain ID ${targetChainId}) to send transactions.`
+  );
+}
+
 /**
  * Ensures the connected external wallet is on the correct chain
  * before sending a transaction. For local accounts this is a no-op.
@@ -67,33 +94,44 @@ export function useChainEnforcer() {
         params: [{ chainId: targetChainHex }],
       });
     } catch (switchError: any) {
-      if (switchError.code === 4902) {
-        await provider.request({
-          method: 'wallet_addEthereumChain',
-          params: [
-            {
-              chainId: targetChainHex,
-              chainName,
-              nativeCurrency,
-              rpcUrls: [rpcUrl],
-            },
-          ],
-        });
-      } else if (switchError.code === 4001) {
-        throw new Error(
-          'Please switch to the GenLayer network to send transactions.',
-        );
+      if (switchError?.code === 4902) {
+        try {
+          await provider.request({
+            method: 'wallet_addEthereumChain',
+            params: [
+              {
+                chainId: targetChainHex,
+                chainName,
+                nativeCurrency,
+                rpcUrls: [rpcUrl],
+              },
+            ],
+          });
+        } catch (addError: any) {
+          throw new ChainMismatchError(
+            chainMismatchMessage(currentChainId, targetChainId, chainName),
+            { cause: addError },
+          );
+        }
       } else {
-        throw switchError;
+        // User rejection (4001) or any other wallet failure: the wallet is
+        // still on the wrong chain, so explain that and keep the cause.
+        throw new ChainMismatchError(
+          chainMismatchMessage(currentChainId, targetChainId, chainName),
+          { cause: switchError },
+        );
       }
     }
 
+    // Re-read the wallet's chain: some wallets resolve the switch request
+    // without actually changing network (or the user changed it back).
     const newChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
-    if (parseInt(newChainHex, 16) !== targetChainId) {
-      throw new Error(
-        'Please switch to the GenLayer network to send transactions.',
+    const newChainId = parseInt(newChainHex, 16);
+    if (newChainId !== targetChainId) {
+      throw new ChainMismatchError(
+        chainMismatchMessage(newChainId, targetChainId, chainName),
       );
     }
   }
