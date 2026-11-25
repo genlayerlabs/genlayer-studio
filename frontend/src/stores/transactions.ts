@@ -19,6 +19,7 @@ const NON_STUDIO_NOT_FOUND_GRACE_MS = 30_000;
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const transactionClient = computed(() => genlayer.transactionClient.value);
   const networkStore = useNetworkStore();
   const webSocketClient = useWebSocketClient();
   const allTransactions = ref<TransactionItem[]>([]);
@@ -244,13 +245,13 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   async function setTransactionAppeal(tx_address: `0x${string}`) {
-    await genlayerClient.value?.appealTransaction({
+    await transactionClient.value?.appealTransaction({
       txId: tx_address,
     });
   }
 
   async function cancelTransaction(txHash: `0x${string}`) {
-    await genlayerClient.value?.cancelTransaction({
+    await transactionClient.value?.cancelTransaction({
       hash: txHash as TransactionHash,
     });
   }

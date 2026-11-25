@@ -28,6 +28,9 @@ const CHAINS: Record<NetworkName, GenLayerChain> = {
 
 const STORAGE_KEY = 'networkStore.currentNetwork';
 
+// The Bradbury preset points at the rollup RPC, which serves no gen_* methods.
+const BRADBURY_NODE_RPC_URL = 'https://rpc.bradbury.genlayer.com';
+
 // v1 ships one deployment-configured Studio network + Bradbury as
 // runtime-selectable options. Asimov shares Bradbury's chain ID so it is not
 // exposed as a separate dropdown entry; reachable only via a deployment-time
@@ -102,8 +105,21 @@ export const useNetworkStore = defineStore('networkStore', () => {
         chain.value.rpcUrls?.default?.http?.[0] ?? 'http://127.0.0.1:4000/api',
       );
     }
+    if (currentNetwork.value === 'testnetBradbury') {
+      return getRuntimeConfig(
+        'VITE_BRADBURY_NODE_RPC_URL',
+        BRADBURY_NODE_RPC_URL,
+      );
+    }
     return chain.value.rpcUrls?.default?.http?.[0] ?? '';
   });
+
+  // A testnet node RPC is read-only: fees and sending go through the chain RPC.
+  const transactionRpcUrl = computed(() =>
+    isStudio.value
+      ? rpcUrl.value
+      : (chain.value.rpcUrls?.default?.http?.[0] ?? rpcUrl.value),
+  );
 
   const wsUrl = computed<string | null>(() => {
     // WebSocket push events only exist on Studio backends.
@@ -165,6 +181,7 @@ export const useNetworkStore = defineStore('networkStore', () => {
     chainName,
     isStudio,
     rpcUrl,
+    transactionRpcUrl,
     wsUrl,
     availableNetworks,
     setCurrentNetwork,
