@@ -78,6 +78,11 @@ class LogPolicy:
         """Create a policy that logs at DEBUG level (for high-frequency/polling methods)."""
         return cls(log_level=EventType.DEBUG)
 
+    @classmethod
+    def sensitive(cls) -> "LogPolicy":
+        """Create a policy that never logs params or results (they carry secrets)."""
+        return cls(log_request=False, log_success=False)
+
 
 @dataclass(slots=True)
 class RPCEndpointDefinition:
@@ -298,7 +303,11 @@ class RPCEndpointManager:
                     message=f"Argument binding failed for {request.method}: {exc}",
                     data={
                         "method": request.method,
-                        "params": request.params,
+                        "params": (
+                            request.params
+                            if registered.definition.log_policy.log_request
+                            else None
+                        ),
                     },
                     account_address=extract_account_address_from_rpc(
                         request.method, request.params

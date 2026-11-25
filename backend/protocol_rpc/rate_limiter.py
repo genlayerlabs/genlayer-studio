@@ -262,8 +262,10 @@ class RateLimiterService:
         """Look up API key id and tier, using Redis cache."""
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         cache_key = f"ratelimit:tier:{key_hash}"
-        identity = f"key:{key_hash[:16]}"
 
+        # Try cache first
+        cached = None
+        identity = f"key:{key_hash[:16]}"
         if use_cache:
             try:
                 cached = await self._redis.hgetall(cache_key)

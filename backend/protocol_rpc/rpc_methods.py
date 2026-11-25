@@ -856,7 +856,7 @@ async def rpc_admin_deactivate_api_key(
     )
 
 
-@rpc.method("admin_getApiKeyUsage", log_policy=LogPolicy.debug())
+@rpc.method("admin_getApiKeyUsage", log_policy=LogPolicy.sensitive())
 def rpc_admin_get_api_key_usage(
     key_prefix: str = None,
     api_key_id: int = None,
@@ -875,7 +875,7 @@ def rpc_admin_get_api_key_usage(
     )
 
 
-@rpc.method("admin_getApiKeyTransactions", log_policy=LogPolicy.debug())
+@rpc.method("admin_getApiKeyTransactions", log_policy=LogPolicy.sensitive())
 def rpc_admin_get_api_key_transactions(
     key_prefix: str = None,
     api_key_id: int = None,

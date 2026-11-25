@@ -307,3 +307,66 @@ async def test_client_cannot_set_the_api_key_through_params(monkeypatch):
 
     assert response.error["code"] == -32602
     assert received == {}
+
+
+USAGE_METHODS = ("admin_getApiKeyUsage", "admin_getApiKeyTransactions")
+ADMIN_SECRET = "admin-secret-value"
+
+
+def _usage_manager(monkeypatch):
+    for name in ("admin_get_api_key_usage", "admin_get_api_key_transactions"):
+        monkeypatch.setattr(endpoints, name, lambda **kwargs: {"keys": ["glk_ab12"]})
+    app = FastAPI()
+    app.dependency_overrides[get_db_session] = lambda: MagicMock()
+    logger = StubMessageHandler()
+    manager = RPCEndpointManager(logger, dependency_overrides_provider=app)
+    for definition in rpc_methods.rpc.to_list():
+        if definition.name in USAGE_METHODS:
+            manager.register(definition)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, logger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", USAGE_METHODS)
+async def test_api_key_usage_methods_do_not_log_params_or_results(monkeypatch, method):
+    manager, request, logger = _usage_manager(monkeypatch)
+
+    response = await manager.invoke(
+        JSONRPCRequest(method=method, params={"admin_key": ADMIN_SECRET}, id=1),
+        request,
+    )
+
+    assert response.result == {"keys": ["glk_ab12"]}
+    assert logger.messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", USAGE_METHODS)
+async def test_api_key_usage_binding_errors_do_not_log_the_admin_key(
+    monkeypatch, method
+):
+    manager, request, logger = _usage_manager(monkeypatch)
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method=method, params={"admin_key": ADMIN_SECRET, "bogus": 1}, id=1
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert logger.messages
+    assert all(ADMIN_SECRET not in repr(event) for event in logger.messages)
