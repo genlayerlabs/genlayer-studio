@@ -45,6 +45,16 @@ const upsertDeployedContract = async (
 ): Promise<void> => {
   const record = toPlain({ ...contract, chainId });
   const existing = deployedContractsOnChain(contract.contractId, chainId);
+  const sameKey = await db.deployedContracts.get([
+    contract.contractId,
+    contract.address,
+  ]);
+  if (sameKey && (sameKey.chainId ?? chainId) !== chainId) {
+    // The key has no chain, so one row without a chain serves every chain.
+    await existing.delete();
+    await db.deployedContracts.put({ ...record, chainId: undefined });
+    return;
+  }
   if ((await existing.count()) > 0) {
     await existing.modify(record);
   } else {

@@ -6,8 +6,11 @@ import { createPinia, setActivePinia } from 'pinia';
 const fakeDb = vi.hoisted(() => {
   type Row = Record<string, any>;
 
-  const createTable = () => {
+  const createTable = (primaryKey: string[] = []) => {
     const rows: Row[] = [];
+    const keyOf = (row: Row) => JSON.stringify(primaryKey.map((f) => row[f]));
+    const indexOfKey = (key: string) =>
+      primaryKey.length ? rows.findIndex((row) => keyOf(row) === key) : -1;
     const collection = (match: (row: Row) => boolean) => ({
       filter: (extra: (row: Row) => boolean) =>
         collection((row) => match(row) && extra(row)),
@@ -27,7 +30,16 @@ const fakeDb = vi.hoisted(() => {
     return {
       rows,
       add: async (row: Row) => {
+        if (indexOfKey(keyOf(row)) !== -1) {
+          throw new DOMException('Key already exists', 'ConstraintError');
+        }
         rows.push(structuredClone(row));
+      },
+      get: async (key: unknown[]) => rows[indexOfKey(JSON.stringify(key))],
+      put: async (row: Row) => {
+        const index = indexOfKey(keyOf(row));
+        if (index === -1) rows.push(structuredClone(row));
+        else rows[index] = structuredClone(row);
       },
       where: (field: string) => ({
         equals: (value: unknown) => collection((row) => row[field] === value),
@@ -41,7 +53,7 @@ const fakeDb = vi.hoisted(() => {
 
   return {
     contractFiles: createTable(),
-    deployedContracts: createTable(),
+    deployedContracts: createTable(['contractId', 'address']),
     transactions: createTable(),
   };
 });
@@ -234,6 +246,27 @@ describe('persistStorePlugin', () => {
           '0xStudio',
         ]),
       );
+    });
+
+    it('keeps a contract deployed at the same address on two chains', async () => {
+      const store = useContractsStore();
+      store.addDeployedContract(deployed('0xSame'));
+      await vi.waitFor(() =>
+        expect(fakeDb.deployedContracts.rows).toHaveLength(1),
+      );
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      store.addDeployedContract(deployed('0xSame'));
+      await vi.waitFor(() =>
+        expect(fakeDb.deployedContracts.rows[0]?.chainId).toBeUndefined(),
+      );
+      expect(fakeDb.deployedContracts.rows).toHaveLength(1);
+      expect(unhandled).not.toHaveBeenCalled();
+
+      const { contractsStore } = await reload();
+      useNetworkStore().setCurrentNetwork('localnet');
+      expect(contractsStore.deployedContracts).toHaveLength(1);
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      expect(contractsStore.deployedContracts).toHaveLength(1);
     });
 
     it('adopts a record saved without a chain when the contract is redeployed', async () => {
