@@ -139,6 +139,199 @@ async def test_rpc_app_hides_unhandled_exception_details(caplog):
     assert "Unhandled JSON-RPC request failure" in caplog.text
 
 
+class TestApiKeyAttribution:
+    """The middleware exposes the resolved key id to the RPC handlers."""
+
+    @pytest.mark.asyncio
+    async def test_sets_api_key_id_from_usage(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(
+            return_value=RateLimitUsage(
+                bucket="standard",
+                window="minute",
+                limit=30,
+                remaining=29,
+                reset_seconds=60,
+                api_key_id=7,
+            )
+        )
+        request = _make_request(api_key="glk_valid")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, _make_call_next())
+
+        assert request.state.api_key_id == 7
+        assert not any("api" in name.lower() for name in response.headers.keys())
+
+    @pytest.mark.asyncio
+    async def test_anonymous_request_has_no_api_key_id(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(
+            return_value=RateLimitUsage(
+                bucket="standard",
+                window="minute",
+                limit=30,
+                remaining=29,
+                reset_seconds=60,
+            )
+        )
+        request = _make_request()
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert request.state.api_key_id is None
+
+    @pytest.mark.asyncio
+    async def test_identifies_key_when_limits_are_disabled(self):
+        limiter = AsyncMock()
+        limiter.enabled = False
+        limiter.resolve_api_key_id = AsyncMock(return_value=7)
+        request = _make_request(api_key="glk_valid")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        assert request.state.api_key_id == 7
+        limiter.resolve_api_key_id.assert_awaited_once_with("glk_valid")
+        limiter.check_rate_limit.assert_not_called()
+        call_next.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_identifies_path_key_when_limits_are_disabled(self):
+        limiter = AsyncMock()
+        limiter.enabled = False
+        limiter.resolve_api_key_id = AsyncMock(return_value=9)
+        request = _make_request(path="/api/glk_inpath")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert request.state.api_key_id == 9
+        limiter.resolve_api_key_id.assert_awaited_once_with("glk_inpath")
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_is_not_rejected_when_limits_are_disabled(self):
+        limiter = AsyncMock()
+        limiter.enabled = False
+        limiter.resolve_api_key_id = AsyncMock(return_value=None)
+        request = _make_request(api_key="glk_unknown")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        assert request.state.api_key_id is None
+        call_next.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_key_header_is_not_looked_up_when_limits_are_disabled(self):
+        limiter = AsyncMock()
+        limiter.enabled = False
+        request = _make_request(api_key="not-a-studio-key")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, call_next)
+
+        limiter.resolve_api_key_id.assert_not_called()
+        call_next.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_resolver_failure_lets_the_request_through(self):
+        limiter = AsyncMock()
+        limiter.enabled = False
+        limiter.resolve_api_key_id = AsyncMock(side_effect=RuntimeError("redis down"))
+        request = _make_request(api_key="glk_valid")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        call_next.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_limiter_failure_still_attributes_the_key(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(side_effect=RuntimeError("redis down"))
+        limiter.resolve_api_key_id = AsyncMock(return_value=7)
+        request = _make_request(api_key="glk_valid")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        assert request.state.api_key_id == 7
+        limiter.resolve_api_key_id.assert_awaited_once_with(
+            "glk_valid", use_cache=False
+        )
+        call_next.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_limiter_failure_without_key_skips_the_lookup(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(side_effect=RuntimeError("redis down"))
+        request = _make_request()
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        limiter.resolve_api_key_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_limiter_and_database_failure_let_the_request_through(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(side_effect=RuntimeError("redis down"))
+        limiter.resolve_api_key_id = AsyncMock(side_effect=RuntimeError("db down"))
+        request = _make_request(api_key="glk_valid")
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        call_next.assert_called_once()
+
+
+class TestGetApiKeyIdDependency:
+    def test_returns_id_set_by_middleware(self):
+        from starlette.datastructures import State
+
+        from backend.protocol_rpc.dependencies import get_api_key_id
+
+        request = MagicMock()
+        request.state = State()
+        assert get_api_key_id(request) is None
+
+        request.state.api_key_id = 7
+        assert get_api_key_id(request) == 7
+
+        request.state.api_key_id = "7"
+        assert get_api_key_id(request) is None
+
+
 class TestMiddlewareRateLimiting:
     @pytest.mark.asyncio
     async def test_allows_when_under_limit(self):

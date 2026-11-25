@@ -4,7 +4,12 @@ from starlette.requests import Request
 from unittest.mock import MagicMock
 
 from backend.protocol_rpc import endpoints, rpc_methods
-from backend.protocol_rpc.dependencies import get_db_session
+from backend.protocol_rpc.dependencies import (
+    get_consensus_service,
+    get_db_session,
+    get_message_handler,
+    get_transactions_parser,
+)
 from backend.protocol_rpc.exceptions import JSONRPCError, MethodNotFound
 from backend.protocol_rpc.rpc_endpoint_manager import (
     JSONRPCRequest,
@@ -216,3 +221,89 @@ async def test_manager_returns_invalid_params_when_arguments_missing():
 
     assert response.error["code"] == -32602
     assert "missing" in response.error["message"].lower()
+
+
+def _raw_transaction_manager(monkeypatch):
+    received = {}
+
+    def fake_send_raw_transaction(**kwargs):
+        received.update(kwargs)
+        return "0xhash"
+
+    monkeypatch.setattr(endpoints, "send_raw_transaction", fake_send_raw_transaction)
+    app = FastAPI()
+    for dependency in (
+        get_db_session,
+        get_message_handler,
+        get_transactions_parser,
+        get_consensus_service,
+    ):
+        app.dependency_overrides[dependency] = lambda: MagicMock()
+    manager = RPCEndpointManager(
+        StubMessageHandler(), dependency_overrides_provider=app
+    )
+    manager.register(
+        RPCEndpointDefinition(
+            name="eth_sendRawTransaction",
+            handler=rpc_methods.eth_send_raw_transaction,
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, received
+
+
+@pytest.mark.asyncio
+async def test_send_raw_transaction_receives_the_request_api_key(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+    request.state.api_key_id = 7
+
+    response = await manager.invoke(
+        JSONRPCRequest(method="eth_sendRawTransaction", params=["0xraw"], id=1),
+        request,
+    )
+
+    assert response.result == "0xhash"
+    assert received["api_key_id"] == 7
+    assert received["signed_rollup_transaction"] == "0xraw"
+
+
+@pytest.mark.asyncio
+async def test_send_raw_transaction_without_key_is_unattributed(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+
+    await manager.invoke(
+        JSONRPCRequest(method="eth_sendRawTransaction", params=["0xraw"], id=1),
+        request,
+    )
+
+    assert received["api_key_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_client_cannot_set_the_api_key_through_params(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+    request.state.api_key_id = 7
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method="eth_sendRawTransaction",
+            params={"signed_rollup_transaction": "0xraw", "api_key_id": 99},
+            id=1,
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert received == {}
