@@ -23,6 +23,7 @@ interface RuntimeConfig {
   VITE_APPKIT_PROJECT_ID?: string;
   VITE_EXPLORER_URL?: string;
   VITE_LOCK_NETWORK?: string;
+  VITE_BRADBURY_NODE_RPC_URL?: string;
   VITE_APP_VERSION?: string;
 }
 
