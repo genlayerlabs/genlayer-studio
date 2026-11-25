@@ -52,6 +52,9 @@ describe('useNetworkStore', () => {
     store.setCurrentNetwork('testnetBradbury');
 
     expect(store.rpcUrl).toBe('https://rpc.bradbury.genlayer.com');
+    expect(store.transactionRpcUrl).toBe(
+      'https://rpc.testnet-chain.genlayer.com',
+    );
     expect(store.chain.rpcUrls.default.http).toEqual([
       'https://rpc.testnet-chain.genlayer.com',
     ]);
@@ -69,6 +72,16 @@ describe('useNetworkStore', () => {
     store.setCurrentNetwork('testnetBradbury');
 
     expect(store.rpcUrl).toBe('https://node.example.com');
+    expect(store.transactionRpcUrl).toBe(
+      'https://rpc.testnet-chain.genlayer.com',
+    );
+  });
+
+  it('sends Studio transactions through the Studio RPC', () => {
+    const store = useNetworkStore();
+
+    expect(store.isStudio).toBe(true);
+    expect(store.transactionRpcUrl).toBe(store.rpcUrl);
   });
 
   it('uses runtime Studio chain overrides in the active chain and selector option', () => {

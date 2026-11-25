@@ -114,6 +114,13 @@ export const useNetworkStore = defineStore('networkStore', () => {
     return chain.value.rpcUrls?.default?.http?.[0] ?? '';
   });
 
+  // A testnet node RPC is read-only: fees and sending go through the chain RPC.
+  const transactionRpcUrl = computed(() =>
+    isStudio.value
+      ? rpcUrl.value
+      : (chain.value.rpcUrls?.default?.http?.[0] ?? rpcUrl.value),
+  );
+
   const wsUrl = computed<string | null>(() => {
     // WebSocket push events only exist on Studio backends.
     if (!isStudio.value) return null;
@@ -174,6 +181,7 @@ export const useNetworkStore = defineStore('networkStore', () => {
     chainName,
     isStudio,
     rpcUrl,
+    transactionRpcUrl,
     wsUrl,
     availableNetworks,
     setCurrentNetwork,

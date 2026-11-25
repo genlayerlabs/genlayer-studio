@@ -50,6 +50,18 @@ const mockGenlayerClient = {
   estimateTransactionFeesForWrite: mockEstimateTransactionFeesForWrite as any,
 };
 
+const mockChainDeployContract = vi.fn(() => Promise.resolve('0xChainDeploy'));
+const mockChainWriteContract = vi.fn(() => Promise.resolve('0xChainWrite'));
+const mockChainEstimateTransactionFees = vi.fn();
+const mockChainEstimateTransactionFeesForWrite = vi.fn();
+const mockChainClient = {
+  deployContract: mockChainDeployContract,
+  writeContract: mockChainWriteContract,
+  estimateTransactionFees: mockChainEstimateTransactionFees,
+  estimateTransactionFeesForWrite: mockChainEstimateTransactionFeesForWrite,
+};
+const mockTransactionClient = ref<any>(mockGenlayerClient);
+
 const mockEnsureCorrectChain = vi.fn();
 const mockMessageAllocations = [
   {
@@ -134,6 +146,7 @@ vi.mock('@/hooks', () => ({
   useEventTracking: vi.fn(() => ({ trackEvent: vi.fn() })),
   useGenlayer: vi.fn(() => ({
     client: ref(mockGenlayerClient),
+    transactionClient: mockTransactionClient,
   })),
   useRpcClient: vi.fn(() => mockRpcClient),
   useWallet: vi.fn(() => ({
@@ -180,6 +193,7 @@ describe('useContractQueries — behavioral contract', () => {
     mockNetworkStore.isStudio = false;
     mockNetworkStore.rpcUrl = 'http://127.0.0.1:4000/api';
     mockNetworkStore.chain = {};
+    mockTransactionClient.value = mockGenlayerClient;
     mockGenlayerClient.estimateTransactionFees = mockEstimateTransactionFees;
     mockRpcGetFeeConfig.mockResolvedValue({
       enabled: true,
@@ -712,6 +726,39 @@ describe('useContractQueries — behavioral contract', () => {
           fees: expect.objectContaining({ feeValue: 120000000000000000n }),
         }),
       );
+    });
+
+    it('should send through the chain RPC client when the node RPC is read-only', async () => {
+      mockNetworkStore.chain = feeManagerChain;
+      mockTransactionClient.value = mockChainClient;
+      mockChainEstimateTransactionFees.mockResolvedValue(writeEstimate);
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract, callWriteMethod } = useContractQueries();
+
+      await deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3);
+      await callWriteMethod({
+        method: 'tip',
+        args: { args: [], kwargs: {} },
+        executionMode: 'NORMAL' as any,
+      });
+
+      expect(mockChainEstimateTransactionFees).toHaveBeenCalledTimes(2);
+      expect(mockChainEstimateTransactionFeesForWrite).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFeesForWrite).not.toHaveBeenCalled();
+      expect(mockChainDeployContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fees: expect.objectContaining({ feeValue: 30000000000000000n }),
+        }),
+      );
+      expect(mockChainWriteContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          functionName: 'tip',
+          fees: expect.objectContaining({ feeValue: 30000000000000000n }),
+        }),
+      );
+      expect(mockDeployContract).not.toHaveBeenCalled();
+      expect(mockWriteContract).not.toHaveBeenCalled();
     });
 
     it('should omit fees when the fee policy is disabled', async () => {

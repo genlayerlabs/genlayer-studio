@@ -179,6 +179,7 @@ async function sdkCallWithFallback<T>(
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const transactionClient = computed(() => genlayer.transactionClient.value);
   const networkStore = useNetworkStore();
   const rpcClient = useRpcClient();
   const wallet = useWallet();
@@ -270,10 +271,12 @@ export function useContractQueries() {
       return undefined;
     }
 
-    const client = genlayerClient.value as unknown as
+    const client = transactionClient.value as unknown as
       | NetworkFeeClient
       | undefined;
-    if (write && client?.estimateTransactionFeesForWrite) {
+    // Sizing a write needs gen_call, which a separate chain RPC does not serve.
+    const canSimulate = transactionClient.value === genlayerClient.value;
+    if (write && canSimulate && client?.estimateTransactionFeesForWrite) {
       try {
         return feesFromNetworkEstimate(
           await client.estimateTransactionFeesForWrite({
@@ -432,7 +435,7 @@ export function useContractQueries() {
           })
         : await getNetworkFees();
 
-      const result = await genlayerClient.value?.deployContract({
+      const result = await transactionClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         kwargs: args.kwargs,
@@ -577,7 +580,7 @@ export function useContractQueries() {
             leaderOnly,
           });
 
-      const result = await genlayerClient.value?.writeContract({
+      const result = await transactionClient.value?.writeContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
