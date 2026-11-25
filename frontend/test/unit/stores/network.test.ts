@@ -51,7 +51,7 @@ describe('useNetworkStore', () => {
     const store = useNetworkStore();
     store.setCurrentNetwork('testnetBradbury');
 
-    expect(store.rpcUrl).toBe('https://rpc-bradbury.genlayer.com');
+    expect(store.rpcUrl).toBe('https://rpc.bradbury.genlayer.com');
     expect(store.chain.rpcUrls.default.http).toEqual([
       'https://rpc.testnet-chain.genlayer.com',
     ]);

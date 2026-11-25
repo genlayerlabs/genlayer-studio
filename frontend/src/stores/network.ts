@@ -29,7 +29,7 @@ const CHAINS: Record<NetworkName, GenLayerChain> = {
 const STORAGE_KEY = 'networkStore.currentNetwork';
 
 // The Bradbury preset points at the rollup RPC, which serves no gen_* methods.
-const BRADBURY_NODE_RPC_URL = 'https://rpc-bradbury.genlayer.com';
+const BRADBURY_NODE_RPC_URL = 'https://rpc.bradbury.genlayer.com';
 
 // v1 ships one deployment-configured Studio network + Bradbury as
 // runtime-selectable options. Asimov shares Bradbury's chain ID so it is not
