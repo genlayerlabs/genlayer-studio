@@ -7,7 +7,7 @@ import {
   transactionsStatusNameToNumber,
 } from 'genlayer-js/types';
 import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
-import { useNetworkStore } from '@/stores/network';
+import { isRecordInScope, useNetworkStore } from '@/stores/network';
 
 // Non-Studio chains have no WebSocket push (tx status updates come via
 // `useTransactionListener` which is wired to WS events that only Studio
@@ -24,8 +24,8 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   const webSocketClient = useWebSocketClient();
   const allTransactions = ref<TransactionItem[]>([]);
   const transactions = computed<TransactionItem[]>(() =>
-    allTransactions.value.filter(
-      (t) => t.chainId === undefined || t.chainId === networkStore.chainId,
+    allTransactions.value.filter((t) =>
+      isRecordInScope(t, networkStore.recordScope),
     ),
   );
   const subscriptions = new Set<string>();
@@ -48,8 +48,9 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   // On network change, drop WS subscriptions (they are Studio-only anyway)
   // and re-subscribe to the current network's pending-ish txs on Studio.
   // On non-Studio, start the polling loop.
+  // Watch the network, not the chain ID: Bradbury and Clarke share one.
   watch(
-    () => networkStore.chainId,
+    () => networkStore.currentNetwork,
     () => {
       unsubscribeAll();
       if (networkStore.isStudio) {
@@ -143,11 +144,14 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   function addTransaction(tx: TransactionItem) {
-    const stamped = {
+    const stamped: TransactionItem = {
       ...tx,
       chainId: tx.chainId ?? networkStore.chainId,
       addedAt: tx.addedAt ?? Date.now(),
     };
+    if (tx.chainId === undefined && networkStore.recordScope.network) {
+      stamped.network = networkStore.recordScope.network;
+    }
     allTransactions.value.unshift(stamped); // Push on top in case there's no date property yet
     subscribe([stamped.hash]);
     if (!networkStore.isStudio) {

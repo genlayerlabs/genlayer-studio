@@ -132,6 +132,23 @@ describe('persistStorePlugin', () => {
   });
 
   describe('transactions', () => {
+    it('keeps Bradbury and Clarke transactions apart after a reload', async () => {
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      useTransactionsStore().addTransaction(pendingTransaction('0xbradbury'));
+      useNetworkStore().setCurrentNetwork('testnetClarke');
+      useTransactionsStore().addTransaction(pendingTransaction('0xclarke'));
+      await vi.waitFor(() => expect(fakeDb.transactions.rows).toHaveLength(2));
+
+      const { transactionsStore } = await reload();
+      expect(transactionsStore.transactions.map((t) => t.hash)).toEqual([
+        '0xclarke',
+      ]);
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      expect(transactionsStore.transactions.map((t) => t.hash)).toEqual([
+        '0xbradbury',
+      ]);
+    });
+
     it('saves an added transaction with its chain and timestamp', async () => {
       const store = useTransactionsStore();
 
@@ -208,6 +225,43 @@ describe('persistStorePlugin', () => {
 
       useNetworkStore().setCurrentNetwork('testnetBradbury');
       expect(contractsStore.deployedContracts).toHaveLength(0);
+    });
+
+    it('does not show a Bradbury deployment on Clarke, nor the reverse', async () => {
+      const store = useContractsStore();
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      store.addDeployedContract(deployed('0xBradbury'));
+      useNetworkStore().setCurrentNetwork('testnetClarke');
+      expect(store.deployedContracts).toHaveLength(0);
+      store.addDeployedContract(deployed('0xClarke'));
+      await vi.waitFor(() =>
+        expect(
+          fakeDb.deployedContracts.rows.map((r) => [
+            r.address,
+            r.chainId,
+            r.network,
+          ]),
+        ).toEqual([
+          ['0xBradbury', BRADBURY_CHAIN_ID, undefined],
+          ['0xClarke', BRADBURY_CHAIN_ID, 'testnetClarke'],
+        ]),
+      );
+
+      const { contractsStore } = await reload();
+      expect(contractsStore.deployedContracts.map((c) => c.address)).toEqual([
+        '0xClarke',
+      ]);
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      expect(contractsStore.deployedContracts.map((c) => c.address)).toEqual([
+        '0xBradbury',
+      ]);
+
+      contractsStore.removeDeployedContract('contract-1');
+      await vi.waitFor(() =>
+        expect(fakeDb.deployedContracts.rows.map((r) => r.address)).toEqual([
+          '0xClarke',
+        ]),
+      );
     });
 
     it('keeps one record per chain for the same contract', async () => {
