@@ -47,12 +47,11 @@ def _ensure_dotenv_loaded_for_chain_id() -> None:
         return
 
     try:
-        from dotenv import load_dotenv
+        from backend.env_loader import load_env
     except Exception:
         return
 
-    dotenv_path = Path(__file__).resolve().parents[2] / ".env"
-    load_dotenv(dotenv_path=dotenv_path, override=False)
+    load_env(Path(__file__).resolve().parents[2])
 
 
 # endregion

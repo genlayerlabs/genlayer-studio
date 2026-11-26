@@ -8,7 +8,7 @@
 - `docker/`, `docker-compose*.yml`, and `scripts/`: container orchestrators and developer utilities used in CI pipelines.
 
 ## Build, Test, and Development Commands
-- `cp .env.example .env && docker compose up`: launches the full stack; add `-d` for background runs.
+- `scripts/compose.sh up`: launches the full stack with `.env.default` defaults plus optional `.env` overrides; add `-d` for background runs.
 - `docker compose up jsonrpc webrequest ollama database-migration postgres`: backend services only, ideal when pairing with a hot-reload frontend.
 - `cd frontend && npm install && npm run dev`: start the Vue dev server on port 5173.
 - `cd frontend && npm run build`: perform type-checking and emit production assets in `dist/`.

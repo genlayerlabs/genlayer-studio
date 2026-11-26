@@ -36,9 +36,15 @@ Have ideas for new features or use cases? We're eager to hear them! But first:
 - **1.3. Setup the Studio locally**: launch the Studio's frontend and backend by running the docker compose command (Please note that you must have docker, node, and npm installed)
 
    ```sh
-   $ cp .env.example .env
-   $ docker compose up
+   $ scripts/compose.sh up   # layers the tracked .env.default and your optional .env overrides
    ```
+
+   Configuration is layered: the tracked `.env.default` is always loaded and the optional, git-ignored `.env` overrides it (copy `.env.example` as a starting template, keeping only the keys you change). Things to know:
+
+   - Use `scripts/compose.sh` (not plain `docker compose`) when `.env` references a key defined only in `.env.default`, and for any explicit `-f docker-compose.yml` call with a partial or missing `.env`: plain Compose and a bare `-f` read only `.env` for `${VAR}` interpolation and lose the defaults. Plain `docker compose` also warns that both `compose.yaml` and `docker-compose.yml` exist; it uses `compose.yaml`.
+   - Containers receive `.env.default` and `.env` through `env_file`, so edits need `scripts/compose.sh up -d` (recreate); `restart` does not pick them up. `.env.default` also overrides image `ENV` such as `GENVM_TAG`.
+   - A key you delete from `.env` falls back to its `.env.default` value.
+   - Local frontend development (`npm run dev`) and the integration tests still read only `.env`: run `cp .env.default .env` first for those.
 
    When building GenVM from source, install Nix locally and configure
    `sandbox = true` in `nix.conf`. After exporting `GENVM_SOURCE_MODE=source`

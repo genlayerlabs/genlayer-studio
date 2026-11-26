@@ -5,14 +5,14 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from dotenv import load_dotenv
+from backend.env_loader import load_env
 from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import ClientDisconnect
 
 # Load environment variables early so SENTRY_DSN is available for initialization
-load_dotenv()
+load_env()
 
 from backend.protocol_rpc.api_key_redaction import (
     install_log_redaction,
