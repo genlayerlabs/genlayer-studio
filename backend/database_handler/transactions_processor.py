@@ -648,6 +648,7 @@ class TransactionsProcessor:
         execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
         origin_address: str | None = None,
         commit: bool = True,
+        api_key_id: int | None = None,
     ) -> str:
 
         if transaction_hash is None:
@@ -663,6 +664,15 @@ class TransactionsProcessor:
         )
         if existing_transaction is not None:
             return transaction_hash
+
+        triggered_by = (
+            self.session.query(Transactions).filter_by(hash=triggered_by_hash).one()
+            if triggered_by_hash
+            else None
+        )
+        # Triggered transactions are attributed to the key of their root.
+        if api_key_id is None and triggered_by is not None:
+            api_key_id = triggered_by.api_key_id
 
         new_transaction = Transactions(
             hash=transaction_hash,
@@ -683,11 +693,7 @@ class TransactionsProcessor:
             leader_only=leader_only,
             origin_address=origin_address if origin_address else from_address,
             execution_mode=execution_mode,
-            triggered_by=(
-                self.session.query(Transactions).filter_by(hash=triggered_by_hash).one()
-                if triggered_by_hash
-                else None
-            ),
+            triggered_by=triggered_by,
             appealed=False,
             timestamp_awaiting_finalization=None,
             appeal_failed=0,
@@ -705,6 +711,7 @@ class TransactionsProcessor:
             appeal_validators_timeout=False,
             sim_config=sim_config,
             triggered_on=triggered_on,
+            api_key_id=api_key_id,
         )
 
         self.session.add(new_transaction)

@@ -83,10 +83,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         rate_limiter: Optional[RateLimiterService] = getattr(
             request.app.state, "rate_limiter", None
         )
-        if rate_limiter is None or not rate_limiter.enabled:
+        if rate_limiter is None:
             return await call_next(request)
 
         api_key = self._api_key(request)
+        if not rate_limiter.enabled:
+            await self._identify_api_key(request, rate_limiter, api_key)
+            return await call_next(request)
+
         client_ip = self._client_ip(request)
         is_cheap_read = await self._is_cheap_read(request)
 
@@ -95,6 +99,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             usage = await rate_limiter.check_rate_limit(
                 api_key, client_ip, is_cheap_read=is_cheap_read
             )
+            if usage is not None:
+                request.state.api_key_id = usage.api_key_id
         except RateLimitExceeded as exc:
             return JSONResponse(
                 status_code=429,
@@ -110,11 +116,36 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 "Rate limiter unavailable, allowing request through",
                 exc_info=True,
             )
+            await self._identify_api_key(
+                request, rate_limiter, api_key, use_cache=False
+            )
 
         response = await call_next(request)
         if usage is not None:
             response.headers.update(usage.as_headers())
         return response
+
+    @staticmethod
+    async def _identify_api_key(
+        request: Request,
+        rate_limiter: RateLimiterService,
+        api_key: Optional[str],
+        use_cache: bool = True,
+    ) -> None:
+        """Attribute the request to its key without metering; an unknown key is ignored."""
+        if not api_key or not api_key.startswith(API_KEY_PREFIX):
+            return
+        try:
+            if use_cache:
+                key_id = await rate_limiter.resolve_api_key_id(api_key)
+            else:
+                key_id = await rate_limiter.resolve_api_key_id(api_key, use_cache=False)
+            request.state.api_key_id = key_id
+        except Exception:
+            logger.warning(
+                "Could not resolve API key for attribution",
+                exc_info=True,
+            )
 
     @staticmethod
     def _is_rpc_path(path: str) -> bool:
