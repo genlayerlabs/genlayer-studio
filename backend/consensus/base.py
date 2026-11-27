@@ -3205,6 +3205,10 @@ class ProposingState(TransactionState):
                     context.consensus_data.leader_receipt[0],
                     proposal_policy,
                 )
+                _validate_reveal_message_fees(
+                    context.transaction,
+                    context.consensus_data.leader_receipt[0],
+                )
             except FeeValidationError as exc:
                 # The on-chain proposal/reveal call reverts on these caps.
                 # Studio advances to the equivalent leader-timeout path
@@ -4500,6 +4504,26 @@ def _consume_parent_message_fee_payloads(
         )
     except FeeValidationError as exc:
         raise RuntimeError(str(exc)) from exc
+
+
+def _validate_reveal_message_fees(
+    transaction: Transaction,
+    leader_receipt: Receipt,
+) -> None:
+    # Dry run of the reveal accounting: raises what acceptance would hit later.
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        return
+    parent_fee_accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not parent_fee_accounting:
+        return
+    prepare_reveal_message_generation(
+        parent_fee_accounting,
+        transaction.hash,
+        _reveal_message_fee_payloads(
+            parent_fee_accounting,
+            leader_receipt.pending_transactions,
+        ),
+    )
 
 
 def _sync_reveal_message_fee_accounting(

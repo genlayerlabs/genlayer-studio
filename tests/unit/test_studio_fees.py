@@ -14420,3 +14420,62 @@ def test_latest_appeal_admission_unresolved_only_before_an_outcome(rounds, unres
 
     assert latest_appeal_admission_unresolved(appealed, history) is unresolved
     assert latest_appeal_admission_unresolved(accounting, history) is False
+
+
+def _reveal_dry_run_inputs(*, total_message_fees, declared_budget, success=True):
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=total_message_fees),
+        num_of_validators=5,
+        submitted_value=1100 + total_message_fees,
+        user_value=0,
+    )
+    transaction = SimpleNamespace(
+        hash="0x" + "ab" * 32,
+        data={FEE_ACCOUNTING_KEY: accounting},
+    )
+    receipt = SimpleNamespace(
+        execution_result=(
+            ExecutionResultStatus.SUCCESS if success else ExecutionResultStatus.ERROR
+        ),
+        pending_transactions=[
+            PendingTransaction(
+                address="0x2222222222222222222222222222222222222222",
+                calldata=b"\x06",
+                code=None,
+                salt_nonce=0,
+                on="finalized",
+                value=2 * 10**18,
+                fee_params=_encode_internal_fee_params(),
+                declared_budget=declared_budget,
+            )
+        ],
+    )
+    return transaction, receipt
+
+
+def test_reveal_dry_run_rejects_unfunded_message_at_proposal():
+    transaction, receipt = _reveal_dry_run_inputs(
+        total_message_fees=0, declared_budget=0
+    )
+
+    with pytest.raises(MessageDeclaredBudgetInsufficient):
+        consensus_base._validate_reveal_message_fees(transaction, receipt)
+
+
+def test_reveal_dry_run_accepts_funded_message_without_mutating_accounting():
+    transaction, receipt = _reveal_dry_run_inputs(
+        total_message_fees=100, declared_budget=55
+    )
+    before = json.dumps(transaction.data[FEE_ACCOUNTING_KEY], sort_keys=True)
+
+    consensus_base._validate_reveal_message_fees(transaction, receipt)
+
+    assert json.dumps(transaction.data[FEE_ACCOUNTING_KEY], sort_keys=True) == before
+
+
+def test_reveal_dry_run_skips_failed_leader_execution():
+    transaction, receipt = _reveal_dry_run_inputs(
+        total_message_fees=0, declared_budget=0, success=False
+    )
+
+    consensus_base._validate_reveal_message_fees(transaction, receipt)
