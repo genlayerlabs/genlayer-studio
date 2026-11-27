@@ -4,7 +4,12 @@ from starlette.requests import Request
 from unittest.mock import MagicMock
 
 from backend.protocol_rpc import endpoints, rpc_methods
-from backend.protocol_rpc.dependencies import get_db_session
+from backend.protocol_rpc.dependencies import (
+    get_consensus_service,
+    get_db_session,
+    get_message_handler,
+    get_transactions_parser,
+)
 from backend.protocol_rpc.exceptions import JSONRPCError, MethodNotFound
 from backend.protocol_rpc.rpc_endpoint_manager import (
     JSONRPCRequest,
@@ -216,3 +221,238 @@ async def test_manager_returns_invalid_params_when_arguments_missing():
 
     assert response.error["code"] == -32602
     assert "missing" in response.error["message"].lower()
+
+
+def _raw_transaction_manager(monkeypatch):
+    received = {}
+
+    def fake_send_raw_transaction(**kwargs):
+        received.update(kwargs)
+        return "0xhash"
+
+    monkeypatch.setattr(endpoints, "send_raw_transaction", fake_send_raw_transaction)
+    app = FastAPI()
+    for dependency in (
+        get_db_session,
+        get_message_handler,
+        get_transactions_parser,
+        get_consensus_service,
+    ):
+        app.dependency_overrides[dependency] = lambda: MagicMock()
+    manager = RPCEndpointManager(
+        StubMessageHandler(), dependency_overrides_provider=app
+    )
+    manager.register(
+        RPCEndpointDefinition(
+            name="eth_sendRawTransaction",
+            handler=rpc_methods.eth_send_raw_transaction,
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, received
+
+
+@pytest.mark.asyncio
+async def test_send_raw_transaction_receives_the_request_api_key(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+    request.state.api_key_id = 7
+
+    response = await manager.invoke(
+        JSONRPCRequest(method="eth_sendRawTransaction", params=["0xraw"], id=1),
+        request,
+    )
+
+    assert response.result == "0xhash"
+    assert received["api_key_id"] == 7
+    assert received["signed_rollup_transaction"] == "0xraw"
+
+
+@pytest.mark.asyncio
+async def test_send_raw_transaction_without_key_is_unattributed(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+
+    await manager.invoke(
+        JSONRPCRequest(method="eth_sendRawTransaction", params=["0xraw"], id=1),
+        request,
+    )
+
+    assert received["api_key_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_client_cannot_set_the_api_key_through_params(monkeypatch):
+    manager, request, received = _raw_transaction_manager(monkeypatch)
+    request.state.api_key_id = 7
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method="eth_sendRawTransaction",
+            params={"signed_rollup_transaction": "0xraw", "api_key_id": 99},
+            id=1,
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert received == {}
+
+
+USAGE_METHODS = ("admin_getApiKeyUsage", "admin_getApiKeyTransactions")
+ADMIN_SECRET = "admin-secret-value"
+
+
+def _usage_manager(monkeypatch):
+    for name in ("admin_get_api_key_usage", "admin_get_api_key_transactions"):
+        monkeypatch.setattr(endpoints, name, lambda **kwargs: {"keys": ["glk_ab12"]})
+    app = FastAPI()
+    app.dependency_overrides[get_db_session] = lambda: MagicMock()
+    logger = StubMessageHandler()
+    manager = RPCEndpointManager(logger, dependency_overrides_provider=app)
+    for definition in rpc_methods.rpc.to_list():
+        if definition.name in USAGE_METHODS:
+            manager.register(definition)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, logger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", USAGE_METHODS)
+async def test_api_key_usage_methods_do_not_log_params_or_results(monkeypatch, method):
+    manager, request, logger = _usage_manager(monkeypatch)
+
+    response = await manager.invoke(
+        JSONRPCRequest(method=method, params={"admin_key": ADMIN_SECRET}, id=1),
+        request,
+    )
+
+    assert response.result == {"keys": ["glk_ab12"]}
+    assert logger.messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", USAGE_METHODS)
+async def test_api_key_usage_binding_errors_do_not_log_the_admin_key(
+    monkeypatch, method
+):
+    manager, request, logger = _usage_manager(monkeypatch)
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method=method, params={"admin_key": ADMIN_SECRET, "bogus": 1}, id=1
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert logger.messages
+    assert all(ADMIN_SECRET not in repr(event) for event in logger.messages)
+
+
+def test_every_admin_method_is_registered_as_sensitive():
+    admin_methods = [
+        definition
+        for definition in rpc_methods.rpc.to_list()
+        if definition.name.startswith("admin_")
+    ]
+
+    assert admin_methods
+    for definition in admin_methods:
+        assert not definition.log_policy.log_request, definition.name
+        assert not definition.log_policy.log_success, definition.name
+
+
+def _secret_echo_manager():
+    """A default-policy endpoint taking admin_key, like sim_upgradeContractCode."""
+    app = FastAPI()
+    logger = StubMessageHandler()
+
+    def endpoint(new_code: str, admin_key: str = None) -> dict:
+        return {"upgraded": True, "api_key": "glk_" + "f" * 64}
+
+    manager = RPCEndpointManager(logger, dependency_overrides_provider=app)
+    manager.register(RPCEndpointDefinition(name="sim_secretEcho", handler=endpoint))
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, logger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"new_code": "code", "admin_key": ADMIN_SECRET},
+        ["code", ADMIN_SECRET],
+        # Long enough to be truncated into a string before logging.
+        {"new_code": "x" * 5000, "admin_key": ADMIN_SECRET},
+        ["x" * 5000, ADMIN_SECRET],
+    ],
+)
+async def test_logged_params_and_results_redact_secrets(params):
+    manager, request, logger = _secret_echo_manager()
+
+    response = await manager.invoke(
+        JSONRPCRequest(method="sim_secretEcho", params=params, id=1), request
+    )
+
+    assert response.result["upgraded"] is True
+    assert [event.name for event in logger.messages] == [
+        "endpoint_call",
+        "endpoint_success",
+    ]
+    logged = repr([event.data for event in logger.messages])
+    assert ADMIN_SECRET not in logged
+    assert "glk_" not in logged
+    assert "[REDACTED]" in logged
+
+
+@pytest.mark.asyncio
+async def test_binding_errors_redact_secrets_under_the_default_policy():
+    manager, request, logger = _secret_echo_manager()
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method="sim_secretEcho",
+            params={"new_code": "code", "admin_key": ADMIN_SECRET, "bogus": 1},
+            id=1,
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert logger.messages
+    assert all(ADMIN_SECRET not in repr(event) for event in logger.messages)
