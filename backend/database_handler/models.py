@@ -229,6 +229,10 @@ class Transactions(Base):
     recovery_count: Mapped[int] = mapped_column(
         Integer, server_default="0", nullable=False, default=0
     )
+    # api_keys.id of the request that submitted this tx or its root ancestor.
+    api_key_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None
+    )
 
 
 class TransactionSnapshotArchive(Base):

@@ -16,6 +16,7 @@ from backend.protocol_rpc.dependencies import (
     get_llm_provider_registry,
     get_message_handler,
     get_rate_limiter,
+    get_api_key_id,
     get_snapshot_manager,
     get_sqlalchemy_db,
     get_transactions_parser,
@@ -617,6 +618,7 @@ def eth_send_raw_transaction(
     transactions_parser=Depends(get_transactions_parser),
     consensus_service=Depends(get_consensus_service),
     sim_config: dict | None = None,
+    api_key_id: int | None = Depends(get_api_key_id),
 ) -> str:
     return impl.send_raw_transaction(
         session=session,
@@ -625,6 +627,7 @@ def eth_send_raw_transaction(
         consensus_service=consensus_service,
         signed_rollup_transaction=signed_rollup_transaction,
         sim_config=sim_config,
+        api_key_id=api_key_id,
     )
 
 
@@ -775,7 +778,7 @@ def dev_get_pool_status(
 # ---------------------------------------------------------------------------
 
 
-@rpc.method("admin_createTier")
+@rpc.method("admin_createTier", log_policy=LogPolicy.sensitive())
 def rpc_admin_create_tier(
     name: str,
     rate_limit_minute: int,
@@ -794,7 +797,7 @@ def rpc_admin_create_tier(
     )
 
 
-@rpc.method("admin_listTiers")
+@rpc.method("admin_listTiers", log_policy=LogPolicy.sensitive())
 def rpc_admin_list_tiers(
     admin_key: str = None,
     session: Session = Depends(get_db_session),
@@ -802,7 +805,7 @@ def rpc_admin_list_tiers(
     return impl.admin_list_tiers(session=session, admin_key=admin_key)
 
 
-@rpc.method("admin_createApiKey")
+@rpc.method("admin_createApiKey", log_policy=LogPolicy.sensitive())
 def rpc_admin_create_api_key(
     tier_name: str,
     description: str = None,
@@ -817,7 +820,7 @@ def rpc_admin_create_api_key(
     )
 
 
-@rpc.method("admin_deactivateApiKey")
+@rpc.method("admin_deactivateApiKey", log_policy=LogPolicy.sensitive())
 async def rpc_admin_deactivate_api_key(
     key_prefix: str,
     admin_key: str = None,
@@ -828,5 +831,47 @@ async def rpc_admin_deactivate_api_key(
         session=session,
         key_prefix=key_prefix,
         rate_limiter=rate_limiter,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_getApiKeyUsage", log_policy=LogPolicy.sensitive())
+def rpc_admin_get_api_key_usage(
+    key_prefix: str = None,
+    api_key_id: int = None,
+    from_timestamp: str | int | None = None,
+    to_timestamp: str | int | None = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_get_api_key_usage(
+        session=session,
+        key_prefix=key_prefix,
+        api_key_id=api_key_id,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_getApiKeyTransactions", log_policy=LogPolicy.sensitive())
+def rpc_admin_get_api_key_transactions(
+    key_prefix: str = None,
+    api_key_id: int = None,
+    from_timestamp: str | int | None = None,
+    to_timestamp: str | int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_get_api_key_transactions(
+        session=session,
+        key_prefix=key_prefix,
+        api_key_id=api_key_id,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        limit=limit,
+        offset=offset,
         admin_key=admin_key,
     )
