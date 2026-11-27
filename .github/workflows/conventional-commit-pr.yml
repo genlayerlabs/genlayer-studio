@@ -3,7 +3,7 @@ name: PR Conventional Commit Validation
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-    branches: [main]
+    # Validate on every base branch, including automatically retargeted release trains.
 
 jobs:
   validate-pr-title:

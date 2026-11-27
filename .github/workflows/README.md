@@ -22,3 +22,10 @@ Release tags have two explicit channels:
 `manual-docker-release.yml` applies the same rules when it creates a tag.
 
 See `docs/BRANCHING.md` for the contributor-facing branch model.
+
+`conventional-commit-pr.yml` validates PR titles on every base branch, including
+stable and integration branches. The `edited` event allows corrected titles to
+be revalidated after automatic retargeting away from `main`.
+
+Run its trigger regression tests with `pytest tests/unit/test_pr_title_workflow.py` (requires pytest and
+PyYAML).
