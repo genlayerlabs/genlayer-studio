@@ -181,6 +181,45 @@ class InternalMessageEmissionError(RuntimeError):
 # Marks a child whose creation Consensus would reject; it is skipped and refunded.
 CHILD_CREATION_ERROR_KEY = "_studio_child_creation_error"
 
+# --------------------------------------------------------------------------- #
+# Child-task ownership
+#
+# Consensus processing spawns child tasks (leader / validator executions) and
+# waits on them with asyncio.wait(), which does NOT cancel them when the
+# waiting task itself is cancelled. When a worker drops in-flight work (e.g.
+# before a snapshot restore) the whole task tree must stop and finish its
+# cleanup before the claim is released — otherwise orphaned validator tasks
+# keep running and write (e.g. add_state_timestamp) into the restored state.
+# --------------------------------------------------------------------------- #
+
+
+def _raise_if_current_task_cancelled() -> None:
+    """Re-raise a cancellation of the *current* task that a broad
+    ``except CancelledError`` (meant for a child task) swallowed."""
+    current = asyncio.current_task()
+    if current is not None and current.cancelling():
+        raise asyncio.CancelledError()
+
+
+async def _cancel_and_wait(tasks: Iterable[asyncio.Future]) -> None:
+    """Cancel ``tasks`` and wait until they have actually finished."""
+    tasks = [task for task in tasks if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _wait_owning(tasks: Iterable[asyncio.Future], **kwargs):
+    """``asyncio.wait`` that cancels and awaits ``tasks`` if the waiter is
+    cancelled (or fails) instead of leaving them running unowned."""
+    tasks = list(tasks)
+    try:
+        return await asyncio.wait(tasks, **kwargs)
+    except BaseException:
+        await _cancel_and_wait(tasks)
+        raise
+
 
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
     """
@@ -3137,7 +3176,7 @@ class ProposingState(TransactionState):
                 leader_node.exec_transaction(context.transaction)
             )
             try:
-                done, _ = await asyncio.wait(
+                done, _ = await _wait_owning(
                     {exec_task},
                     timeout=remaining,
                     return_when=asyncio.FIRST_COMPLETED,
@@ -3148,6 +3187,7 @@ class ProposingState(TransactionState):
                         await asyncio.wait_for(exec_task, timeout=0.1)
                     except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                         pass
+                    _raise_if_current_task_cancelled()
                     context.consensus_data.leader_receipt = [
                         _build_leader_timeout_receipt(context.leader)
                     ]
@@ -3420,7 +3460,7 @@ class CommittingState(TransactionState):
                     exec_task = asyncio.create_task(
                         node.exec_transaction(context.transaction)
                     )
-                    done, _ = await asyncio.wait(
+                    done, _ = await _wait_owning(
                         {exec_task},
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
@@ -3446,6 +3486,7 @@ class CommittingState(TransactionState):
                             Exception,
                         ):
                             pass
+                        _raise_if_current_task_cancelled()
                         context.transactions_processor.add_state_timestamp(
                             context.transaction.hash,
                             f"COMMITTING.VALIDATOR_{index}_TIMEOUT"
@@ -3521,6 +3562,7 @@ class CommittingState(TransactionState):
                     await task
                 except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                     pass
+            _raise_if_current_task_cancelled()
 
         async def _run_validator_wave(
             results: list[Receipt | None],
@@ -3536,6 +3578,21 @@ class CommittingState(TransactionState):
                 ): index
                 for index in indexes_to_run
             }
+            try:
+                return await _drive_validator_wave(
+                    results, slot_validators, tasks_by_task
+                )
+            except BaseException:
+                # Cancelled (worker dropping in-flight work) or a validator
+                # raised: don't leave sibling validator tasks running.
+                await _cancel_and_wait(tasks_by_task)
+                raise
+
+        async def _drive_validator_wave(
+            results: list[Receipt | None],
+            slot_validators: list[dict],
+            tasks_by_task: dict[asyncio.Task, int],
+        ) -> bool:
             pending = set(tasks_by_task)
             while pending:
                 done, pending = await asyncio.wait(
