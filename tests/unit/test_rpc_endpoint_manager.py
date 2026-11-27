@@ -370,3 +370,89 @@ async def test_api_key_usage_binding_errors_do_not_log_the_admin_key(
     assert response.error["code"] == -32602
     assert logger.messages
     assert all(ADMIN_SECRET not in repr(event) for event in logger.messages)
+
+
+def test_every_admin_method_is_registered_as_sensitive():
+    admin_methods = [
+        definition
+        for definition in rpc_methods.rpc.to_list()
+        if definition.name.startswith("admin_")
+    ]
+
+    assert admin_methods
+    for definition in admin_methods:
+        assert not definition.log_policy.log_request, definition.name
+        assert not definition.log_policy.log_success, definition.name
+
+
+def _secret_echo_manager():
+    """A default-policy endpoint taking admin_key, like sim_upgradeContractCode."""
+    app = FastAPI()
+    logger = StubMessageHandler()
+
+    def endpoint(new_code: str, admin_key: str = None) -> dict:
+        return {"upgraded": True, "api_key": "glk_" + "f" * 64}
+
+    manager = RPCEndpointManager(logger, dependency_overrides_provider=app)
+    manager.register(RPCEndpointDefinition(name="sim_secretEcho", handler=endpoint))
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+    return manager, request, logger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"new_code": "code", "admin_key": ADMIN_SECRET},
+        ["code", ADMIN_SECRET],
+        # Long enough to be truncated into a string before logging.
+        {"new_code": "x" * 5000, "admin_key": ADMIN_SECRET},
+        ["x" * 5000, ADMIN_SECRET],
+    ],
+)
+async def test_logged_params_and_results_redact_secrets(params):
+    manager, request, logger = _secret_echo_manager()
+
+    response = await manager.invoke(
+        JSONRPCRequest(method="sim_secretEcho", params=params, id=1), request
+    )
+
+    assert response.result["upgraded"] is True
+    assert [event.name for event in logger.messages] == [
+        "endpoint_call",
+        "endpoint_success",
+    ]
+    logged = repr([event.data for event in logger.messages])
+    assert ADMIN_SECRET not in logged
+    assert "glk_" not in logged
+    assert "[REDACTED]" in logged
+
+
+@pytest.mark.asyncio
+async def test_binding_errors_redact_secrets_under_the_default_policy():
+    manager, request, logger = _secret_echo_manager()
+
+    response = await manager.invoke(
+        JSONRPCRequest(
+            method="sim_secretEcho",
+            params={"new_code": "code", "admin_key": ADMIN_SECRET, "bogus": 1},
+            id=1,
+        ),
+        request,
+    )
+
+    assert response.error["code"] == -32602
+    assert logger.messages
+    assert all(ADMIN_SECRET not in repr(event) for event in logger.messages)

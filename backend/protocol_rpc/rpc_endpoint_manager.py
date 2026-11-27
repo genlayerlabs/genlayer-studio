@@ -30,6 +30,39 @@ from backend.protocol_rpc.message_handler.method_utils import (
     extract_transaction_hash_from_rpc,
 )
 
+# Params and result fields that carry credentials. RPC log events are published
+# to websocket channels that any client can subscribe to, so these never leave
+# the server.
+SECRET_FIELDS = frozenset({"admin_key", "api_key"})
+REDACTED = "[REDACTED]"
+
+
+def _redact_params_for_log(
+    params: Any, user_parameters: List[inspect.Parameter]
+) -> Any:
+    """Mask secret params, whether passed by name or by position."""
+    if isinstance(params, dict):
+        return {
+            key: REDACTED if key in SECRET_FIELDS else value
+            for key, value in params.items()
+        }
+    if isinstance(params, list):
+        names = [parameter.name for parameter in user_parameters]
+        return [
+            REDACTED if index < len(names) and names[index] in SECRET_FIELDS else value
+            for index, value in enumerate(params)
+        ]
+    return params
+
+
+def _redact_result_for_log(result: Any) -> Any:
+    if isinstance(result, dict):
+        return {
+            key: REDACTED if key in SECRET_FIELDS else value
+            for key, value in result.items()
+        }
+    return result
+
 
 def _truncate_params_for_log(params: Any) -> Any:
     """
@@ -178,6 +211,10 @@ class RPCEndpointManager:
             if client_session_id
             else self._logger
         )
+        # Redact before truncating: truncation turns params into a string.
+        log_params = _truncate_params_for_log(
+            _redact_params_for_log(request.params, registered.user_parameters)
+        )
 
         try:
             if should_log and definition.log_policy.log_request:
@@ -189,7 +226,7 @@ class RPCEndpointManager:
                         message=f"RPC method called: {request.method}",
                         data={
                             "method": request.method,
-                            "params": _truncate_params_for_log(request.params),
+                            "params": log_params,
                         },
                         account_address=account_address,
                         client_session_id=client_session_id,
@@ -216,8 +253,10 @@ class RPCEndpointManager:
                             message=f"RPC method completed: {request.method}",
                             data={
                                 "method": request.method,
-                                "params": _truncate_params_for_log(request.params),
-                                "result": _truncate_result_for_log(result),
+                                "params": log_params,
+                                "result": _truncate_result_for_log(
+                                    _redact_result_for_log(result)
+                                ),
                             },
                             account_address=account_address,
                             client_session_id=client_session_id,
@@ -304,7 +343,9 @@ class RPCEndpointManager:
                     data={
                         "method": request.method,
                         "params": (
-                            request.params
+                            _redact_params_for_log(
+                                request.params, registered.user_parameters
+                            )
                             if registered.definition.log_policy.log_request
                             else None
                         ),

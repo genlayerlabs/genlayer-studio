@@ -799,7 +799,7 @@ def dev_get_pool_status(
 # ---------------------------------------------------------------------------
 
 
-@rpc.method("admin_createTier")
+@rpc.method("admin_createTier", log_policy=LogPolicy.sensitive())
 def rpc_admin_create_tier(
     name: str,
     rate_limit_minute: int,
@@ -818,7 +818,7 @@ def rpc_admin_create_tier(
     )
 
 
-@rpc.method("admin_listTiers")
+@rpc.method("admin_listTiers", log_policy=LogPolicy.sensitive())
 def rpc_admin_list_tiers(
     admin_key: str = None,
     session: Session = Depends(get_db_session),
@@ -826,7 +826,7 @@ def rpc_admin_list_tiers(
     return impl.admin_list_tiers(session=session, admin_key=admin_key)
 
 
-@rpc.method("admin_createApiKey")
+@rpc.method("admin_createApiKey", log_policy=LogPolicy.sensitive())
 def rpc_admin_create_api_key(
     tier_name: str,
     description: str = None,
@@ -841,7 +841,7 @@ def rpc_admin_create_api_key(
     )
 
 
-@rpc.method("admin_deactivateApiKey")
+@rpc.method("admin_deactivateApiKey", log_policy=LogPolicy.sensitive())
 async def rpc_admin_deactivate_api_key(
     key_prefix: str,
     admin_key: str = None,
