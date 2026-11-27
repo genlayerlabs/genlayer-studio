@@ -102,6 +102,7 @@ from backend.node.genvm.origin import base_host
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
+from backend.protocol_rpc import api_key_usage
 
 import base64
 import hashlib
@@ -3058,6 +3059,7 @@ def send_raw_transaction(
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
+    api_key_id: int | None = None,
 ) -> str:
     """Admit one signed envelope atomically with its protocol mutation."""
 
@@ -3069,6 +3071,7 @@ def send_raw_transaction(
             consensus_service,
             signed_rollup_transaction,
             sim_config,
+            api_key_id,
         )
     except _EvmExecutionReverted as reverted:
         # Solidity execution reverts roll back the protocol mutation, but the
@@ -3115,6 +3118,7 @@ def _send_raw_transaction_impl(
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
+    api_key_id: int | None = None,
 ) -> str:
     """Persist a raw transaction using a request-scoped session."""
     _validate_genvm_executor_selector(sim_config)
@@ -3448,6 +3452,7 @@ def _send_raw_transaction_impl(
                 None,  # triggered_on
                 execution_mode,
                 commit=False,
+                api_key_id=api_key_id,
             )
         except Exception:
             if storage_reservation is not None:
@@ -4006,6 +4011,7 @@ def admin_create_api_key(
     session.add(api_key)
     session.flush()
     return {
+        "id": api_key.id,
         "api_key": raw_key,
         "key_prefix": raw_key[:8],
         "tier": tier_name,
@@ -4037,3 +4043,43 @@ async def admin_deactivate_api_key(
         await rate_limiter.invalidate_key_cache(api_key.key_hash)
 
     return {"key_prefix": key_prefix, "deactivated": True}
+
+
+@require_admin_access
+def admin_get_api_key_usage(
+    session: Session,
+    key_prefix: str = None,
+    api_key_id: int = None,
+    from_timestamp: str | int | None = None,
+    to_timestamp: str | int | None = None,
+    admin_key: str = None,
+) -> dict:
+    return api_key_usage.get_usage(
+        session,
+        api_key_id=api_key_id,
+        key_prefix=key_prefix,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
+
+
+@require_admin_access
+def admin_get_api_key_transactions(
+    session: Session,
+    key_prefix: str = None,
+    api_key_id: int = None,
+    from_timestamp: str | int | None = None,
+    to_timestamp: str | int | None = None,
+    limit: int = api_key_usage.DEFAULT_PAGE_SIZE,
+    offset: int = 0,
+    admin_key: str = None,
+) -> dict:
+    return api_key_usage.list_transactions(
+        session,
+        api_key_id=api_key_id,
+        key_prefix=key_prefix,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        limit=limit,
+        offset=offset,
+    )
