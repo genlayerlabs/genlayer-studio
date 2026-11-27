@@ -5,8 +5,8 @@ This repo follows the GenLayer release-train model.
 ## Current Train
 
 - Current stable branch: `v0.121`
-- Active integration branch: `v0.123-dev`
-- Next stable target: `v0.123`
+- Active integration branch: `v0.124-dev`
+- Next stable target: `v0.124`
 - `main`: default/static branch alias for the active integration branch
 
 ## Stable Branches
