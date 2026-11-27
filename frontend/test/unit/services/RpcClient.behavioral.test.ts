@@ -134,7 +134,7 @@ describe('RpcClient — behavioral contract', () => {
 
   it('POSTs to the RPC URL resolved from the network store', async () => {
     mockWsClient.connected = true;
-    mockNetworkStore.rpcUrl = 'https://rpc-bradbury.genlayer.com';
+    mockNetworkStore.rpcUrl = 'https://rpc.bradbury.genlayer.com';
     mockNetworkStore.isStudio = false;
 
     vi.resetModules();
@@ -144,6 +144,6 @@ describe('RpcClient — behavioral contract', () => {
     await client.call({ method: 'ping', params: [] });
 
     const url = mockFetch.mock.calls[0][0];
-    expect(url).toBe('https://rpc-bradbury.genlayer.com');
+    expect(url).toBe('https://rpc.bradbury.genlayer.com');
   });
 });

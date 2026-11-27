@@ -86,6 +86,43 @@ function feesFromStudioEstimate(
   };
 }
 
+type NetworkFeeClient = {
+  estimateTransactionFees?: () => Promise<TrustedFeeEstimate>;
+  estimateTransactionFeesForWrite?: (
+    args: Record<string, unknown>,
+  ) => Promise<TrustedFeeEstimate>;
+};
+
+type NetworkWriteTarget = {
+  method: string;
+  args: CalldataEncodable[];
+  kwargs: { [key: string]: CalldataEncodable };
+  value: bigint;
+  leaderOnly: boolean;
+};
+
+function feesFromNetworkEstimate(estimate: TrustedFeeEstimate) {
+  if (estimate.policy?.enabled === false) {
+    return undefined;
+  }
+  return {
+    distribution: estimate.distribution,
+    feeValue: BigInt(estimate.feeValue),
+    ...(estimate.messageAllocations !== undefined
+      ? { messageAllocations: estimate.messageAllocations }
+      : {}),
+  };
+}
+
+function isRpcMethodNotFound(error: unknown) {
+  let current = error as { code?: unknown; cause?: unknown } | undefined;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (Number(current.code) === -32601) return true;
+    current = current.cause as typeof current;
+  }
+  return false;
+}
+
 function isExpectedSimulationExecutionFailure(error: unknown) {
   return (
     error instanceof JsonRpcServiceError &&
@@ -162,6 +199,7 @@ function errorToastText(error: any): string | undefined {
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const transactionClient = computed(() => genlayer.transactionClient.value);
   const networkStore = useNetworkStore();
   const rpcClient = useRpcClient();
   const wallet = useWallet();
@@ -299,6 +337,41 @@ export function useContractQueries() {
     }
   }
 
+  // Networks with a FeeManager reject transactions sent without fees.
+  async function getNetworkFees(write?: NetworkWriteTarget) {
+    if (!networkStore.chain.feeManagerContract?.address) {
+      return undefined;
+    }
+
+    const client = transactionClient.value as unknown as
+      | NetworkFeeClient
+      | undefined;
+    // Sizing a write needs gen_call, which a separate chain RPC does not serve.
+    const canSimulate = transactionClient.value === genlayerClient.value;
+    if (write && canSimulate && client?.estimateTransactionFeesForWrite) {
+      try {
+        return feesFromNetworkEstimate(
+          await client.estimateTransactionFeesForWrite({
+            address: address.value,
+            functionName: write.method,
+            args: write.args,
+            kwargs: write.kwargs,
+            value: write.value,
+            leaderOnly: write.leaderOnly,
+          }),
+        );
+      } catch (error) {
+        // An RPC without gen_call cannot size the write; use the base estimate.
+        if (!isRpcMethodNotFound(error)) throw error;
+      }
+    }
+
+    if (!client?.estimateTransactionFees) {
+      return undefined;
+    }
+    return feesFromNetworkEstimate(await client.estimateTransactionFees());
+  }
+
   async function getStudioWriteFees({
     method,
     args,
@@ -417,9 +490,9 @@ export function useContractQueries() {
             kwargs: args.kwargs,
             leaderOnly,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees();
 
-      const result = await genlayerClient.value?.deployContract({
+      const result = await transactionClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         kwargs: args.kwargs,
@@ -559,9 +632,15 @@ export function useContractQueries() {
             value,
             leaderOnly,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees({
+            method,
+            args: args.args,
+            kwargs: args.kwargs,
+            value,
+            leaderOnly,
+          });
 
-      const result = await genlayerClient.value?.writeContract({
+      const result = await transactionClient.value?.writeContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
@@ -617,7 +696,7 @@ export function useContractQueries() {
             value: value ?? 0n,
             leaderOnly: false,
           })
-        : await getDefaultStudioFees();
+        : await getNetworkFees();
       const from =
         accountsStore.selectedAccount?.address ||
         '0x0000000000000000000000000000000000000000';

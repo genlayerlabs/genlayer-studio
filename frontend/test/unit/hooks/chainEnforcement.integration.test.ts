@@ -135,7 +135,10 @@ vi.mock('@/hooks', async () => {
   return {
     useChainEnforcer,
     useEventTracking: vi.fn(() => ({ trackEvent: vi.fn() })),
-    useGenlayer: vi.fn(() => ({ client: ref(mockGenlayerClient) })),
+    useGenlayer: vi.fn(() => ({
+      client: ref(mockGenlayerClient),
+      transactionClient: ref(mockGenlayerClient),
+    })),
     useRpcClient: vi.fn(() => ({})),
     useWallet: vi.fn(() => ({ walletProvider: mockWalletProvider })),
   };
