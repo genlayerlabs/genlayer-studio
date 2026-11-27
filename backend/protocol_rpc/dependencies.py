@@ -198,3 +198,9 @@ def get_llm_provider_registry(
 
 def get_rate_limiter(request: Request):
     return _peek_state_attr(_get_app_state(request), "rate_limiter")
+
+
+def get_api_key_id(request: Request) -> Optional[int]:
+    """Id of the API key the request was sent with, set by RateLimitMiddleware."""
+    api_key_id = getattr(request.state, "api_key_id", None)
+    return api_key_id if isinstance(api_key_id, int) else None
