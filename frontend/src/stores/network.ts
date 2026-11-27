@@ -5,6 +5,7 @@ import {
   studionet,
   testnetAsimov,
   testnetBradbury,
+  testnetClarke,
 } from 'genlayer-js/chains';
 import type { GenLayerChain } from 'genlayer-js/types';
 import {
@@ -17,13 +18,15 @@ export type NetworkName =
   | 'localnet'
   | 'studionet'
   | 'testnetAsimov'
-  | 'testnetBradbury';
+  | 'testnetBradbury'
+  | 'testnetClarke';
 
 const CHAINS: Record<NetworkName, GenLayerChain> = {
   localnet: localnet as GenLayerChain,
   studionet: studionet as GenLayerChain,
   testnetAsimov: testnetAsimov as GenLayerChain,
   testnetBradbury: testnetBradbury as GenLayerChain,
+  testnetClarke: testnetClarke as GenLayerChain,
 };
 
 const STORAGE_KEY = 'networkStore.currentNetwork';
@@ -31,11 +34,48 @@ const STORAGE_KEY = 'networkStore.currentNetwork';
 // The Bradbury preset points at the rollup RPC, which serves no gen_* methods.
 const BRADBURY_NODE_RPC_URL = 'https://rpc.bradbury.genlayer.com';
 
-// v1 ships one deployment-configured Studio network + Bradbury as
-// runtime-selectable options. Asimov shares Bradbury's chain ID so it is not
-// exposed as a separate dropdown entry; reachable only via a deployment-time
-// `VITE_GENLAYER_NETWORK` override.
-const SELECTABLE_TESTNET_NETWORKS: NetworkName[] = ['testnetBradbury'];
+// Clarke has no default node: its preset also points at the rollup RPC, so the
+// deployment has to name the Clarke full node in `VITE_CLARKE_NODE_RPC_URL`.
+function getClarkeNodeRpcUrl(): string {
+  return getRuntimeConfig('VITE_CLARKE_NODE_RPC_URL', '');
+}
+
+// One deployment-configured Studio network plus the testnets are
+// runtime-selectable. Asimov shares Bradbury's chain ID so it is not exposed
+// as a separate dropdown entry; reachable only via a deployment-time
+// `VITE_GENLAYER_NETWORK` override. Clarke is offered only once it has a node.
+function getSelectableTestnetNetworks(): NetworkName[] {
+  return getClarkeNodeRpcUrl()
+    ? ['testnetBradbury', 'testnetClarke']
+    : ['testnetBradbury'];
+}
+
+/**
+ * Identifies whose records a stored contract or transaction is. Clarke and
+ * Bradbury are two deployments on the same chain, so the chain ID alone does
+ * not tell them apart: Clarke records also carry the network name. Records of
+ * every other network carry no name, as they did before Clarke existed.
+ */
+export interface RecordScope {
+  chainId: number;
+  network?: string;
+}
+
+export function getRecordScope(
+  network: NetworkName,
+  chainId: number,
+): RecordScope {
+  return network === 'testnetClarke' ? { chainId, network } : { chainId };
+}
+
+// A record saved without a chain belongs to whichever network is asking.
+export function isRecordInScope(
+  record: { chainId?: number; network?: string },
+  scope: RecordScope,
+): boolean {
+  if (record.chainId === undefined) return true;
+  return record.chainId === scope.chainId && record.network === scope.network;
+}
 
 function getConfiguredNetwork(): NetworkName {
   const fromEnv = getRuntimeConfig(
@@ -96,6 +136,9 @@ export const useNetworkStore = defineStore('networkStore', () => {
   const chainId = computed(() => chain.value.id);
   const isStudio = computed(() => Boolean(chain.value.isStudio));
   const chainName = computed(() => chain.value.name);
+  const recordScope = computed<RecordScope>(() =>
+    getRecordScope(currentNetwork.value, chainId.value),
+  );
 
   const rpcUrl = computed(() => {
     // On Studio, operators can override the RPC URL (e.g. hosted deployment).
@@ -110,6 +153,9 @@ export const useNetworkStore = defineStore('networkStore', () => {
         'VITE_BRADBURY_NODE_RPC_URL',
         BRADBURY_NODE_RPC_URL,
       );
+    }
+    if (currentNetwork.value === 'testnetClarke' && getClarkeNodeRpcUrl()) {
+      return getClarkeNodeRpcUrl();
     }
     return chain.value.rpcUrls?.default?.http?.[0] ?? '';
   });
@@ -132,7 +178,7 @@ export const useNetworkStore = defineStore('networkStore', () => {
   >(() => {
     const selectableNetworks: NetworkName[] = [
       getSelectableStudioNetwork(),
-      ...SELECTABLE_TESTNET_NETWORKS,
+      ...getSelectableTestnetNetworks(),
     ];
 
     const list = selectableNetworks.map((name) => {
@@ -180,6 +226,7 @@ export const useNetworkStore = defineStore('networkStore', () => {
     chainId,
     chainName,
     isStudio,
+    recordScope,
     rpcUrl,
     transactionRpcUrl,
     wsUrl,

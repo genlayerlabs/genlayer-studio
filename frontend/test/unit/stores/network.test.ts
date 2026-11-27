@@ -77,6 +77,55 @@ describe('useNetworkStore', () => {
     );
   });
 
+  it('offers Clarke only when the deployment names its node', () => {
+    const withoutNode = useNetworkStore();
+    expect(withoutNode.availableNetworks.map((n) => n.name)).toEqual([
+      'localnet',
+      'testnetBradbury',
+    ]);
+
+    window.__RUNTIME_CONFIG__ = {
+      VITE_CLARKE_NODE_RPC_URL: 'https://clarke-node.example.com',
+    };
+    setActivePinia(createPinia());
+
+    expect(useNetworkStore().availableNetworks.map((n) => n.name)).toEqual([
+      'localnet',
+      'testnetBradbury',
+      'testnetClarke',
+    ]);
+  });
+
+  it('sends Clarke GenLayer RPC calls to its node and uses the Clarke contracts', () => {
+    window.__RUNTIME_CONFIG__ = {
+      VITE_CLARKE_NODE_RPC_URL: 'https://clarke-node.example.com',
+    };
+
+    const store = useNetworkStore();
+    store.setCurrentNetwork('testnetClarke');
+
+    expect(store.rpcUrl).toBe('https://clarke-node.example.com');
+    expect(store.transactionRpcUrl).toBe(
+      'https://rpc.testnet-chain.genlayer.com',
+    );
+    expect(store.chain.consensusMainContract?.address).toBe(
+      '0xa44222E0beDaB12329557499ae6E555b1c9D02ee',
+    );
+  });
+
+  it('tells Clarke records apart from Bradbury ones on the shared chain', () => {
+    const store = useNetworkStore();
+
+    store.setCurrentNetwork('testnetBradbury');
+    const bradbury = store.recordScope;
+    store.setCurrentNetwork('testnetClarke');
+    const clarke = store.recordScope;
+
+    expect(clarke.chainId).toBe(bradbury.chainId);
+    expect(bradbury.network).toBeUndefined();
+    expect(clarke.network).toBe('testnetClarke');
+  });
+
   it('sends Studio transactions through the Studio RPC', () => {
     const store = useNetworkStore();
 

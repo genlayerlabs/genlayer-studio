@@ -3,7 +3,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 import { useDb, useFileName } from '@/hooks';
-import { useNetworkStore } from '@/stores/network';
+import { isRecordInScope, useNetworkStore } from '@/stores/network';
 
 export const useContractsStore = defineStore('contractsStore', () => {
   const contracts = ref<ContractFile[]>([]);
@@ -19,8 +19,8 @@ export const useContractsStore = defineStore('contractsStore', () => {
   // `deployedContracts` computed below.
   const allDeployedContracts = ref<DeployedContract[]>([]);
   const deployedContracts = computed<DeployedContract[]>(() =>
-    allDeployedContracts.value.filter(
-      (c) => c.chainId === undefined || c.chainId === networkStore.chainId,
+    allDeployedContracts.value.filter((c) =>
+      isRecordInScope(c, networkStore.recordScope),
     ),
   );
 
@@ -121,22 +121,25 @@ export const useContractsStore = defineStore('contractsStore', () => {
     address,
     defaultState,
     chainId,
+    network,
   }: DeployedContract): void {
-    const effectiveChainId = chainId ?? networkStore.chainId;
-    // Dedupe by (chainId, contractId): a contract deployed on localnet and
+    // A contract that names its chain keeps its own network; one that does
+    // not is being deployed on the current network.
+    const scope =
+      chainId === undefined ? networkStore.recordScope : { chainId, network };
+    // Dedupe by (network, contractId): a contract deployed on localnet and
     // then again on Bradbury should produce two distinct records.
     const index = allDeployedContracts.value.findIndex(
-      (c) =>
-        c.contractId === contractId &&
-        (c.chainId ?? networkStore.chainId) === effectiveChainId,
+      (c) => c.contractId === contractId && isRecordInScope(c, scope),
     );
 
-    const newItem = {
+    const newItem: DeployedContract = {
       contractId,
       address,
       defaultState,
-      chainId: effectiveChainId,
+      chainId: scope.chainId,
     };
+    if (scope.network) newItem.network = scope.network;
 
     if (index === -1) {
       allDeployedContracts.value.push(newItem);
@@ -151,12 +154,12 @@ export const useContractsStore = defineStore('contractsStore', () => {
   }
 
   function removeDeployedContract(contractId: string): void {
-    // Only remove the record for the current chain; other chains keep theirs.
+    // Only remove the record of the current network; the others keep theirs.
     allDeployedContracts.value = allDeployedContracts.value.filter(
       (c) =>
         !(
           c.contractId === contractId &&
-          (c.chainId ?? networkStore.chainId) === networkStore.chainId
+          isRecordInScope(c, networkStore.recordScope)
         ),
     );
   }

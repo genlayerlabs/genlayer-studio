@@ -20,6 +20,7 @@ interface RuntimeConfig {
   VITE_EXPLORER_URL?: string;
   VITE_LOCK_NETWORK?: string;
   VITE_BRADBURY_NODE_RPC_URL?: string;
+  VITE_CLARKE_NODE_RPC_URL?: string;
   VITE_APP_VERSION?: string;
 }
 

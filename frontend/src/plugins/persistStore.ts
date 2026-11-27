@@ -1,7 +1,11 @@
 import type { ContractFile, DeployedContract, TransactionItem } from '@/types';
 import { type PiniaPluginContext } from 'pinia';
 import { useDb, useFileName } from '@/hooks';
-import { useNetworkStore } from '@/stores/network';
+import {
+  isRecordInScope,
+  useNetworkStore,
+  type RecordScope,
+} from '@/stores/network';
 import { toRaw } from 'vue';
 
 const ENABLE_LOGS = false;
@@ -25,34 +29,38 @@ function toPlain<T>(value: T): T {
   return raw;
 }
 
-// Rows saved without a chain belong to whichever chain is asking.
-const deployedContractsOnChain = (contractId: string, chainId: number) =>
+// Rows saved without a chain belong to whichever network is asking.
+const deployedContractsInScope = (contractId: string, scope: RecordScope) =>
   db.deployedContracts
     .where('contractId')
     .equals(contractId)
-    .filter((row) => (row.chainId ?? chainId) === chainId);
+    .filter((row) => isRecordInScope(row, scope));
 
 /**
  * Upserts a deployed contract into the database.
  *
  * @param {DeployedContract} contract - The contract to upsert.
- * @param {number} chainId - The chain the contract was deployed on.
+ * @param {RecordScope} scope - The network the contract was deployed on.
  * @return {Promise<void>} A Promise that resolves once the contract is upserted.
  */
 const upsertDeployedContract = async (
   contract: DeployedContract,
-  chainId: number,
+  scope: RecordScope,
 ): Promise<void> => {
-  const record = toPlain({ ...contract, chainId });
-  const existing = deployedContractsOnChain(contract.contractId, chainId);
+  const record = toPlain({ ...contract, ...scope });
+  const existing = deployedContractsInScope(contract.contractId, scope);
   const sameKey = await db.deployedContracts.get([
     contract.contractId,
     contract.address,
   ]);
-  if (sameKey && (sameKey.chainId ?? chainId) !== chainId) {
-    // The key has no chain, so one row without a chain serves every chain.
+  if (sameKey && !isRecordInScope(sameKey, scope)) {
+    // The key has no network, so one row without a chain serves every network.
     await existing.delete();
-    await db.deployedContracts.put({ ...record, chainId: undefined });
+    await db.deployedContracts.put({
+      ...record,
+      chainId: undefined,
+      network: undefined,
+    });
     return;
   }
   if ((await existing.count()) > 0) {
@@ -132,7 +140,9 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
               const contract = args[0] as DeployedContract;
               await upsertDeployedContract(
                 contract,
-                contract.chainId ?? useNetworkStore().chainId,
+                contract.chainId === undefined
+                  ? useNetworkStore().recordScope
+                  : { chainId: contract.chainId, network: contract.network },
               );
             }
             break;
@@ -144,9 +154,9 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
             break;
 
           case 'removeDeployedContract':
-            await deployedContractsOnChain(
+            await deployedContractsInScope(
               args[0] as string,
-              useNetworkStore().chainId,
+              useNetworkStore().recordScope,
             ).delete();
             break;
           default:
