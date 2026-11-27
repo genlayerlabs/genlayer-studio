@@ -275,10 +275,33 @@ def _get_int(env_key: str, default: int) -> int:
         return default
 
 
+# Progress of one attempt; the errors that explain a retry are kept.
+_PER_ATTEMPT_STATS = (
+    "manager_run_attempt_success",
+    "host_loop_entered_s",
+    "host_loop_enter_wait_ms",
+    "host_first_method",
+    "host_first_method_received_s",
+    "host_accept_to_first_method_ms",
+    "host_total_handling_time_ms",
+    "host_time_per_method_ms",
+    "call_counts",
+    "nested_connections",
+)
+
+
 class Context(base_host.Context):
     def __init__(self, logger: genvm_logger.Logger | None = None):
         self.logger: genvm_logger.Logger = logger or genvm_logger.NoLogger()
         self.stats: dict[str, typing.Any] = {}
+        self._host_calls_in_flight: list[str] = []
+        self._host_call_counts: dict[str, int] = {}
+        self._last_host_call: str | None = None
+        self._last_host_activity_s: float | None = None
+        self._retries = 0
+        self._in_retry_backoff = False
+        self._run_finished = False
+        self._vm_connections_closed = 0
 
     def on_genvm_success(self):
         if _on_genvm_success is not None:
@@ -290,6 +313,67 @@ class Context(base_host.Context):
 
     def add_stat(self, key: str, value: typing.Any, /):
         self.stats[key] = value
+        # The host loop reports a finished connection only through this stat.
+        if key == "call_counts":
+            self._vm_connections_closed += 1
+
+    @contextlib.contextmanager
+    def host_call(self, name: str):
+        self._host_calls_in_flight.append(name)
+        self._host_call_counts[name] = self._host_call_counts.get(name, 0) + 1
+        self._last_host_call = name
+        self._last_host_activity_s = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._host_calls_in_flight.remove(name)
+            self._last_host_activity_s = time.perf_counter()
+
+    def begin_retry_backoff(self, retries: int) -> None:
+        self._retries = retries
+        self._in_retry_backoff = True
+        for key in _PER_ATTEMPT_STATS:
+            self.stats.pop(key, None)
+        self._vm_connections_closed = 0
+        self._host_call_counts = {}
+        self._last_host_call = None
+        self._last_host_activity_s = None
+
+    def end_retry_backoff(self) -> None:
+        self._in_retry_backoff = False
+
+    def mark_run_finished(self) -> None:
+        self._run_finished = True
+
+    def _phase(self) -> str:
+        if self._run_finished:
+            return "after_genvm"
+        if self._host_calls_in_flight:
+            return f"host_call:{self._host_calls_in_flight[-1]}"
+        if self._in_retry_backoff:
+            return "retry_backoff"
+        if "host_loop_entered_s" in self.stats:
+            opened = 1 + self.stats.get("nested_connections", 0)
+            if self._vm_connections_closed >= opened:
+                return "awaiting_manager_result"
+            # Nondet work (LLM, web) happens inside the VM, so it lands here.
+            return "awaiting_vm"
+        if "manager_run_attempt_success" in self.stats:
+            return "awaiting_executor_connect"
+        return "awaiting_manager"
+
+    def progress(self) -> dict[str, typing.Any]:
+        # Time since a tracked host call started or ended.
+        idle_ms = None
+        if self._last_host_activity_s is not None:
+            idle_ms = round((time.perf_counter() - self._last_host_activity_s) * 1000)
+        return {
+            "phase": self._phase(),
+            "retries": self._retries,
+            "last_host_call": self._last_host_call,
+            "host_idle_ms": idle_ms,
+            "host_call_counts": dict(self._host_call_counts),
+        }
 
     def get_manager_connect_timeout(self) -> float | None:
         # The manager socket is a local websocket; bound only the connect phase
@@ -508,6 +592,17 @@ def _close_watched(sock: socket.socket) -> None:
         sock.close()
 
 
+def _tracked_host_call(method):
+    @functools.wraps(method)
+    async def wrapper(self, *args):
+        if self._ctx is None:
+            return await method(self, *args)
+        with self._ctx.host_call(method.__name__):
+            return await method(self, *args)
+
+    return wrapper
+
+
 class Host(genvmhost.IHost):
     """
     Handles all genvm host methods and accumulates results
@@ -516,6 +611,7 @@ class Host(genvmhost.IHost):
     _result: ExecutionReturn | ExecutionError | None
     _pending_transactions: list[PendingTransaction]
     _nondet_disagreement: None | int = None
+    _ctx: Context | None = None
 
     def __init__(
         self,
@@ -536,7 +632,6 @@ class Host(genvmhost.IHost):
         # A run that delegates across a major boundary spawns nested executors,
         # and each of them dials the same listener, so the first connection is
         # not necessarily the only one.
-        self._ctx: Context | None = None
         self._accept_task: asyncio.Task | None = None
         self._connection_tasks: list[asyncio.Task] = []
         self._accepted_sockets: list[socket.socket] = []
@@ -776,6 +871,7 @@ class Host(genvmhost.IHost):
             sock = await self._accept(cancellation)
             if sock is None:
                 return
+            self._ctx.add_stat("nested_connections", len(self._connection_tasks) + 1)
             self._connection_tasks.append(
                 asyncio.create_task(genvmhost.host_loop_on(self, sock, ctx=self._ctx))
             )
@@ -835,6 +931,7 @@ class Host(genvmhost.IHost):
         self._accepted_sockets.clear()
         self.sock = None
 
+    @_tracked_host_call
     async def storage_read(
         self, type: StorageView, address: bytes, slot: bytes, offset: int, le: int, /
     ) -> bytes:
@@ -845,6 +942,7 @@ class Host(genvmhost.IHost):
         )
         return await asyncio.to_thread(read, Address(address), slot, offset, le)
 
+    @_tracked_host_call
     async def resolve_call_contract_executor(
         self,
         contract_address: Address,
@@ -891,6 +989,7 @@ class Host(genvmhost.IHost):
             return b""
         raise base_host.HostException(host_fns.Errors.EVM_REVERTED)
 
+    @_tracked_host_call
     async def get_balance_gen_wei(self, address: bytes, /) -> int:
         return await asyncio.to_thread(self._state_proxy.get_balance, Address(address))
 
@@ -1007,6 +1106,7 @@ async def run_genvm_host(
     code: bytes | None = None,
     fee_context: GenVMFeeContext | None = None,
     genvm_executor_selector: str | None = None,
+    ctx: Context | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
@@ -1024,7 +1124,7 @@ async def run_genvm_host(
             f"genvm_executor_selector={genvm_executor_selector!r} requires "
             "debug_mode >= safe, got 'disabled'"
         )
-    ctx = Context(logger=logger)
+    ctx = ctx or Context(logger=logger)
     fee_context = fee_context or GenVMFeeContext()
     effective_bucket_totals = (
         dict(fee_context.bucket_totals)
@@ -1059,7 +1159,9 @@ async def run_genvm_host(
 
         while True:
             if retry_delay:
+                ctx.begin_retry_backoff(retry_count)
                 await asyncio.sleep(retry_delay)
+                ctx.end_retry_backoff()
                 retry_delay = 0.0
 
             remaining_time = timeout - (time.time() - start_time)
