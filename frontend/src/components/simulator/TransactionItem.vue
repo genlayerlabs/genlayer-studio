@@ -6,10 +6,10 @@ import type {
   StudioFeeAccounting,
   TransactionItem,
 } from '@/types';
-import TransactionStatusBadge from '@/components/Simulator/TransactionStatusBadge.vue';
+import TransactionStatusBadge from '@/components/simulator/TransactionStatusBadge.vue';
 import { useTimeAgo, useTimestamp } from '@vueuse/core';
-import ModalSection from '@/components/Simulator/ModalSection.vue';
-import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
+import ModalSection from '@/components/simulator/ModalSection.vue';
+import JsonViewer from '@/components/jsonviewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
 import { notify } from '@kyvg/vue3-notification';
 import {

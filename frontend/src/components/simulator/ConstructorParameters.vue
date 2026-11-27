@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useContractQueries } from '@/hooks';
 import { ref, computed } from 'vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { ArrowUpTrayIcon } from '@heroicons/vue/16/solid';
 import ContractParams from './ContractParams.vue';
 import { type ArgData, unfoldArgsData } from './ContractParams';

@@ -6,7 +6,7 @@ import { RouterLink } from 'vue-router';
 import Logo from '@/assets/images/logo.svg';
 import GhostBtn from './global/GhostBtn.vue';
 import NetworkSelector from './global/NetworkSelector.vue';
-import AccountSelect from '@/components/Simulator/AccountSelect.vue';
+import AccountSelect from '@/components/simulator/AccountSelect.vue';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();

@@ -2,8 +2,8 @@
 import { ref } from 'vue';
 import { RouterView } from 'vue-router';
 import SimulatorMenu from '@/components/SimulatorMenu.vue';
-import NodeLogs from '@/components/Simulator/NodeLogs.vue';
-import ContractsPanel from '@/components/Simulator/ContractsPanel.vue';
+import NodeLogs from '@/components/simulator/NodeLogs.vue';
+import ContractsPanel from '@/components/simulator/ContractsPanel.vue';
 import { Splitpanes, Pane } from 'splitpanes';
 import 'splitpanes/dist/splitpanes.css';
 import { useConfig } from '@/hooks';

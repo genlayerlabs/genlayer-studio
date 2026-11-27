@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContractMethod } from 'genlayer-js/types';
-import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
+import ContractMethodItem from '@/components/simulator/ContractMethodItem.vue';
 
 const mocks = vi.hoisted(() => ({
   callWriteMethod: vi.fn(),

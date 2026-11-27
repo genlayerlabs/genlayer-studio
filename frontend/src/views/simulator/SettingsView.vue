@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { useConfig } from '@/hooks';
-import MainTitle from '@/components/Simulator/MainTitle.vue';
-import ProviderSection from '@/components/Simulator/settings/ProviderSection.vue';
-import ConsensusSection from '@/components/Simulator/settings/ConsensusSection.vue';
-import SimulatorSection from '@/components/Simulator/settings/SimulatorSection.vue';
-import ApiKeySection from '@/components/Simulator/settings/ApiKeySection.vue';
+import MainTitle from '@/components/simulator/MainTitle.vue';
+import ProviderSection from '@/components/simulator/settings/ProviderSection.vue';
+import ConsensusSection from '@/components/simulator/settings/ConsensusSection.vue';
+import SimulatorSection from '@/components/simulator/settings/SimulatorSection.vue';
+import ApiKeySection from '@/components/simulator/settings/ApiKeySection.vue';
 
 const { canUpdateProviders } = useConfig();
 </script>
