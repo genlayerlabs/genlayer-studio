@@ -3073,6 +3073,43 @@ def _int_param(value: Any, default: int | None = None) -> int | None:
     return int(value)
 
 
+_MOCK_PLUGIN_CONFIG_KEYS = ("mock_response", "mock_web_response")
+
+
+def _sim_config_has_mocked_validators(sim_config: Any) -> bool:
+    """Return True if any sim_config validator carries mock LLM/web responses.
+
+    Mirrors ``validators.Manager``, which forwards non-empty ``mock_response``
+    / ``mock_web_response`` plugin_config entries to GenVM as host data.
+    """
+    if not isinstance(sim_config, dict):
+        return False
+    validators = sim_config.get("validators") or []
+    if not isinstance(validators, list):
+        return False
+    for validator in validators:
+        if not isinstance(validator, dict):
+            continue
+        plugin_config = validator.get("plugin_config")
+        if not isinstance(plugin_config, dict):
+            continue
+        if any(plugin_config.get(key) for key in _MOCK_PLUGIN_CONFIG_KEYS):
+            return True
+    return False
+
+
+def _reject_mocked_validators_in_hosted_studio(sim_config: Any) -> None:
+    """Hosted studio must not persist transactions executed by mocked validators."""
+    if os.getenv("VITE_IS_HOSTED") != "true":
+        return
+    if _sim_config_has_mocked_validators(sim_config):
+        raise JSONRPCError(
+            code=-32000,
+            message="Mocked validators are not allowed in hosted studio",
+            data={},
+        )
+
+
 def send_raw_transaction(
     session: Session,
     msg_handler: IMessageHandler,
@@ -3142,6 +3179,7 @@ def _send_raw_transaction_impl(
     api_key_id: int | None = None,
 ) -> str:
     """Persist a raw transaction using a request-scoped session."""
+    _reject_mocked_validators_in_hosted_studio(sim_config)
     _validate_genvm_executor_selector(sim_config)
 
     accounts_manager = AccountsManager(session)
